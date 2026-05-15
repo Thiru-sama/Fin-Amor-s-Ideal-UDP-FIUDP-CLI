@@ -11,8 +11,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use clap::Parser;
-use rand::rngs::OsRng;
-use rand::RngCore;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
 const SHARD_SIZE: usize = 1400;
@@ -21,8 +19,14 @@ const TAG_SIZE: usize = 16;
 const RENDEZVOUS_SIZE: usize = 4;
 const SESSION_ID_SIZE: usize = 2;
 const SHARD_INDEX_SIZE: usize = 2;
-const AAD_SIZE: usize = SESSION_ID_SIZE + SHARD_INDEX_SIZE + RENDEZVOUS_SIZE;
-const HEADER_SIZE: usize = AAD_SIZE + NONCE_SIZE + TAG_SIZE;
+const DATA_SHARDS_SIZE: usize = 2;
+const PARITY_SHARDS_SIZE: usize = 2;
+const AAD_SIZE: usize = SESSION_ID_SIZE
+    + SHARD_INDEX_SIZE
+    + DATA_SHARDS_SIZE
+    + PARITY_SHARDS_SIZE
+    + RENDEZVOUS_SIZE;
+const HEADER_SIZE: usize = AAD_SIZE + TAG_SIZE;
 const PACKET_SIZE: usize = HEADER_SIZE + SHARD_SIZE;
 
 const DEFAULT_UDP_PORT: u16 = 5050;
@@ -30,9 +34,10 @@ const DEFAULT_INTER_PACKET_DELAY_US: u64 = 500;
 
 const SESSION_ID_OFFSET: usize = 0;
 const SHARD_INDEX_OFFSET: usize = SESSION_ID_OFFSET + SESSION_ID_SIZE;
-const RENDEZVOUS_OFFSET: usize = SHARD_INDEX_OFFSET + SHARD_INDEX_SIZE;
-const NONCE_OFFSET: usize = RENDEZVOUS_OFFSET + RENDEZVOUS_SIZE;
-const TAG_OFFSET: usize = NONCE_OFFSET + NONCE_SIZE;
+const DATA_SHARDS_OFFSET: usize = SHARD_INDEX_OFFSET + SHARD_INDEX_SIZE;
+const PARITY_SHARDS_OFFSET: usize = DATA_SHARDS_OFFSET + DATA_SHARDS_SIZE;
+const RENDEZVOUS_OFFSET: usize = PARITY_SHARDS_OFFSET + PARITY_SHARDS_SIZE;
+const TAG_OFFSET: usize = RENDEZVOUS_OFFSET + RENDEZVOUS_SIZE;
 const PAYLOAD_OFFSET: usize = TAG_OFFSET + TAG_SIZE;
 
 #[derive(Parser, Debug)]
@@ -112,8 +117,10 @@ impl TryFrom<Args> for Config {
 
 pub fn run(config: Config) -> Result<()> {
     let reader = config.input;
+    let key_path = config.key_path.clone();
     let key_source = FileKeySource::new(config.key_path);
     let key = key_source.load_key()?;
+    let session_id = SessionIdStore::new(&key_path).next()?;
 
     let encryptor = ChaChaEncryptor::new(key);
     let fec = ReedSolomonEngine;
@@ -121,7 +128,7 @@ pub fn run(config: Config) -> Result<()> {
 
     let pipeline = FiudpSender::new(reader, fec, encryptor, sender, config.delay);
 
-    pipeline.send(config.parity_ratio, config.rendezvous_secs)
+    pipeline.send(config.parity_ratio, config.rendezvous_secs, session_id)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -197,6 +204,51 @@ impl KeySource for FileKeySource {
     }
 }
 
+struct SessionIdStore {
+    path: PathBuf,
+}
+
+impl SessionIdStore {
+    fn new(key_path: &Path) -> Self {
+        let mut path = key_path.to_path_buf();
+        path.set_extension("session_id");
+        Self { path }
+    }
+
+    fn next(&self) -> Result<u16> {
+        let current = match fs::read(&self.path) {
+            Ok(bytes) => {
+                if bytes.len() != 2 {
+                    bail!(
+                        "session_id file {} must contain exactly 2 bytes",
+                        self.path.display()
+                    );
+                }
+                let mut buf = [0u8; 2];
+                buf.copy_from_slice(&bytes);
+                Some(u16::from_be_bytes(buf))
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to read session_id file {}", self.path.display()))
+            }
+        };
+
+        let next = match current {
+            Some(value) => value
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("session_id overflow; rotate PSK and reset receiver state"))?,
+            None => 1,
+        };
+
+        fs::write(&self.path, next.to_be_bytes())
+            .with_context(|| format!("failed to write session_id file {}", self.path.display()))?;
+
+        Ok(next)
+    }
+}
+
 trait FecEngine {
     fn encode(
         &self,
@@ -265,13 +317,17 @@ impl Encryptor for ChaChaEncryptor {
 struct PacketBuilder {
     session_id: u16,
     rendezvous_secs: u32,
+    data_shards: u16,
+    parity_shards: u16,
 }
 
 impl PacketBuilder {
-    fn new(session_id: u16, rendezvous_secs: u32) -> Self {
+    fn new(session_id: u16, rendezvous_secs: u32, data_shards: u16, parity_shards: u16) -> Self {
         Self {
             session_id,
             rendezvous_secs,
+            data_shards,
+            parity_shards,
         }
     }
 
@@ -281,6 +337,10 @@ impl PacketBuilder {
             .copy_from_slice(&self.session_id.to_be_bytes());
         aad[SHARD_INDEX_OFFSET..SHARD_INDEX_OFFSET + SHARD_INDEX_SIZE]
             .copy_from_slice(&shard_index.to_be_bytes());
+        aad[DATA_SHARDS_OFFSET..DATA_SHARDS_OFFSET + DATA_SHARDS_SIZE]
+            .copy_from_slice(&self.data_shards.to_be_bytes());
+        aad[PARITY_SHARDS_OFFSET..PARITY_SHARDS_OFFSET + PARITY_SHARDS_SIZE]
+            .copy_from_slice(&self.parity_shards.to_be_bytes());
         aad[RENDEZVOUS_OFFSET..RENDEZVOUS_OFFSET + RENDEZVOUS_SIZE]
             .copy_from_slice(&self.rendezvous_secs.to_be_bytes());
         aad
@@ -290,7 +350,6 @@ impl PacketBuilder {
         &self,
         out: &mut [u8; PACKET_SIZE],
         aad: &[u8; AAD_SIZE],
-        nonce: &[u8; NONCE_SIZE],
         tag: &[u8; TAG_SIZE],
         payload: &[u8],
     ) -> Result<()> {
@@ -303,7 +362,6 @@ impl PacketBuilder {
         }
 
         out[..AAD_SIZE].copy_from_slice(aad);
-        out[NONCE_OFFSET..NONCE_OFFSET + NONCE_SIZE].copy_from_slice(nonce);
         out[TAG_OFFSET..TAG_OFFSET + TAG_SIZE].copy_from_slice(tag);
         out[PAYLOAD_OFFSET..PAYLOAD_OFFSET + SHARD_SIZE].copy_from_slice(payload);
 
@@ -371,7 +429,7 @@ where
         }
     }
 
-    fn send(&self, parity_ratio: ParityRatio, rendezvous_secs: u32) -> Result<()> {
+    fn send(&self, parity_ratio: ParityRatio, rendezvous_secs: u32, session_id: u16) -> Result<()> {
         let mut payload = self.reader.read_all()?;
         if payload.is_empty() {
             bail!("input is empty");
@@ -391,6 +449,11 @@ where
             bail!("total shards {} exceeds u16 limit", total_shards);
         }
 
+        let data_shards_u16 = u16::try_from(data_shards)
+            .context("data_shards exceeds u16 limit")?;
+        let parity_shards_u16 = u16::try_from(parity_shards)
+            .context("parity_shards exceeds u16 limit")?;
+
         let mut parity_buffers = Vec::with_capacity(parity_shards);
         for _ in 0..parity_shards {
             parity_buffers.push(vec![0u8; SHARD_SIZE]);
@@ -405,9 +468,8 @@ where
             self.fec.encode(data_shards, parity_shards, &mut shards)?;
         }
 
-        let mut rng = OsRng;
-        let session_id = (rng.next_u32() & 0xFFFF) as u16;
-        let packet_builder = PacketBuilder::new(session_id, rendezvous_secs);
+        let packet_builder =
+            PacketBuilder::new(session_id, rendezvous_secs, data_shards_u16, parity_shards_u16);
         let mut packet = [0u8; PACKET_SIZE];
 
         let shard_count = shards.len();
@@ -415,13 +477,12 @@ where
             let shard = &mut **shard_ref;
             debug_assert_eq!(shard.len(), SHARD_SIZE);
 
-            let mut nonce = [0u8; NONCE_SIZE];
-            rng.fill_bytes(&mut nonce);
+            let nonce = derive_nonce(session_id, index as u16);
 
             let aad = packet_builder.build_aad(index as u16);
             let tag = self.encryptor.encrypt_in_place(&nonce, &aad, shard)?;
 
-            packet_builder.write_packet(&mut packet, &aad, &nonce, &tag, shard)?;
+            packet_builder.write_packet(&mut packet, &aad, &tag, shard)?;
             self.sender.send(&packet)?;
 
             if index + 1 < shard_count {
@@ -441,6 +502,13 @@ fn pad_to_shard_size(buf: &mut Vec<u8>) {
 
     let new_len = buf.len() + (SHARD_SIZE - rem);
     buf.resize(new_len, 0u8);
+}
+
+fn derive_nonce(session_id: u16, shard_index: u16) -> [u8; NONCE_SIZE] {
+    let mut nonce = [0u8; NONCE_SIZE];
+    nonce[..2].copy_from_slice(&session_id.to_be_bytes());
+    nonce[2..4].copy_from_slice(&shard_index.to_be_bytes());
+    nonce
 }
 
 fn read_key(path: &Path) -> Result<[u8; 32]> {
@@ -495,15 +563,14 @@ mod tests {
 
     #[test]
     fn packet_builder_writes_header_and_payload() {
-        let builder = PacketBuilder::new(0xABCD, 0x01020304);
+        let builder = PacketBuilder::new(0xABCD, 0x01020304, 0x0020, 0x0004);
         let mut packet = [0u8; PACKET_SIZE];
-        let nonce = [0x11; NONCE_SIZE];
         let tag = [0x22; TAG_SIZE];
         let payload = vec![0x33; SHARD_SIZE];
         let aad = builder.build_aad(0x1234);
 
         builder
-            .write_packet(&mut packet, &aad, &nonce, &tag, &payload)
+            .write_packet(&mut packet, &aad, &tag, &payload)
             .unwrap();
 
         assert_eq!(
@@ -515,10 +582,17 @@ mod tests {
             &0x1234u16.to_be_bytes()
         );
         assert_eq!(
+            &packet[DATA_SHARDS_OFFSET..DATA_SHARDS_OFFSET + DATA_SHARDS_SIZE],
+            &0x0020u16.to_be_bytes()
+        );
+        assert_eq!(
+            &packet[PARITY_SHARDS_OFFSET..PARITY_SHARDS_OFFSET + PARITY_SHARDS_SIZE],
+            &0x0004u16.to_be_bytes()
+        );
+        assert_eq!(
             &packet[RENDEZVOUS_OFFSET..RENDEZVOUS_OFFSET + RENDEZVOUS_SIZE],
             &0x01020304u32.to_be_bytes()
         );
-        assert_eq!(&packet[NONCE_OFFSET..NONCE_OFFSET + NONCE_SIZE], &nonce);
         assert_eq!(&packet[TAG_OFFSET..TAG_OFFSET + TAG_SIZE], &tag);
         assert_eq!(
             &packet[PAYLOAD_OFFSET..PAYLOAD_OFFSET + SHARD_SIZE],
@@ -528,15 +602,14 @@ mod tests {
 
     #[test]
     fn packet_builder_rejects_wrong_payload_size() {
-        let builder = PacketBuilder::new(0xABCD, 0);
+        let builder = PacketBuilder::new(0xABCD, 0, 1, 0);
         let mut packet = [0u8; PACKET_SIZE];
-        let nonce = [0u8; NONCE_SIZE];
         let tag = [0u8; TAG_SIZE];
         let payload = vec![0u8; SHARD_SIZE - 1];
         let aad = builder.build_aad(1);
 
         assert!(builder
-            .write_packet(&mut packet, &aad, &nonce, &tag, &payload)
+            .write_packet(&mut packet, &aad, &tag, &payload)
             .is_err());
     }
 }

@@ -1,186 +1,134 @@
-# SPEC - Protocol and Architecture Specification
+# SPEC - FIUDP Protocol and Sender Behavior
 
 ## 0. Status, Scope, and Terminology
 Status: Draft
 
 Scope:
-- Define the end-to-end pipeline from HTML layouts to BMP artifacts.
-- Specify the FIUDP transport framing used to deliver images to a TRMNL-class terminal.
-- Define security, error handling, and power behavior.
+- Define the FIUDP packet format, cryptographic envelope, and FEC framing.
+- Define sender and receiver behavior for a one-way UNIX CLI sender.
+
+Out of scope:
+- HTML/CSS rendering, BMP conversion, and image semantics.
+- Device UI, display driver internals, or panel tuning.
+- Any broker-based or stateful transport.
 
 Terminology:
 - MUST, SHOULD, MAY are to be interpreted as in RFC 2119.
-- Sender: the FIUDP CLI or any compatible transmitter.
-- Terminal: the e-paper display device that receives and renders frames.
-- Frame: the complete BMP byte stream representing a single screen update.
+- Sender: a CLI process that reads bytes and transmits once.
+- Terminal: the device that validates and displays a frame.
+- Frame: the opaque byte stream provided by the caller.
 - Shard: a fixed-size fragment of the frame used for FEC and transport.
 - Session: a single one-way transmission burst.
 - Rendezvous: seconds until the next wake window.
 
-## 1. Core Philosophy and Design Principles
+## 1. UNIX Design Principles
+- Do one thing well: read a byte stream, FEC encode, encrypt, and send.
+- Composability: upstream tools determine image format and content.
+- Determinism: fixed packet size and bounded timing.
+- Minimal state: no handshake, no daemon; only a monotonic session counter.
 
-### 1.1 Hyper-Efficiency
-- One burst per frame: the sender transmits once, then exits.
-- Fixed packet size and fixed shard size allow tight receiver buffers and deterministic timing.
-- No broker, no handshake, no keep-alive traffic.
-- FEC trades a small, bounded bandwidth increase for fewer retries and less radio time.
+### 1.1 Why FIUDP for TRMNL-Class Terminals
+- Purpose-built for one-way frame delivery to e-paper devices.
+- Low power by design: one burst, bounded awake time, no broker.
+- Secure-by-default: authenticated encryption per shard, replay protection.
+- UNIX-friendly: pipes in, UDP out, zero runtime services.
 
-### 1.2 Zero-Trust Security
-- Every shard is authenticated and encrypted with ChaCha20-Poly1305 and a 256-bit pre-shared key (PSK).
-- Metadata that affects rendering or scheduling is authenticated as AEAD AAD to prevent tampering.
-- The receiver rejects unauthenticated shards without side effects and without state promotion.
-- The protocol is stateless and does not trust the network or transport.
+### 1.2 Non-Goals
+- Not a telemetry bus or pub/sub system.
+- Not a general IoT protocol or broker replacement.
+- Not a rendering or image format standard.
+- Not bidirectional or stateful by default.
 
-### 1.3 User Respect and Ethics
-- Local-first: no telemetry, no vendor cloud, no background data flows.
-- No dependency on third-party brokers or opaque SaaS services.
-- Privacy by design: no identifiers beyond the PSK and session-local metadata.
-- Hardware longevity: avoid hot radios, avoid excessive write cycles, and prefer deterministic wake windows.
+## 2. Data Model
+- The sender treats the input frame as opaque bytes.
+- The input MAY be a file or stdin.
+- The frame is zero-padded to a multiple of the shard size.
 
-## 2. System Overview
+### 2.1 Integration Summary (TRMNL and Similar Terminals)
+1) Produce the terminal-native frame bytes (from any external renderer).
+2) Provision a 32-byte PSK on sender and terminal.
+3) Send the frame with the FIUDP sender.
+4) Terminal validates, reconstructs, and displays or discards.
 
-Data flow:
-1) HTML/CSS template is rendered to a pixel-accurate raster.
-2) Raster is converted into a constrained BMP artifact.
-3) BMP bytes are segmented into fixed-size shards.
-4) Shards are FEC-encoded, encrypted, and sent over UDP.
-5) Terminal reassembles, validates, decodes, and renders the frame.
+### 2.2 UNIX Composability Examples
+Send a raw frame file:
+```sh
+fiudp --image ./frame.raw --wake-at 3600 --target 192.0.2.10 --key-file ./psk.bin
+```
 
-Components:
-- Composer: produces the HTML/CSS template and assets.
-- Compiler: renders HTML to BMP deterministically.
-- Sender: FIUDP CLI that transmits a frame.
-- Terminal: validates and displays the frame.
+Stream from a pipeline:
+```sh
+cat ./frame.raw | fiudp --wake-at 1800 --target 192.0.2.10 --key-file ./psk.bin
+```
 
-## 3. HTML-to-BMP Pipeline Specification
+Throttle and increase parity:
+```sh
+fiudp --image ./frame.raw --wake-at 3600 --target 192.0.2.10 --key-file ./psk.bin --parity-ratio 25 --delay-us 1000
+```
 
-### 3.1 Inputs and Constraints
-- All assets MUST be local files. No network fetches are allowed.
-- Fonts MUST be pinned and bundled with the template to ensure deterministic glyph metrics.
-- JavaScript MUST be disabled or restricted to pure, deterministic layout logic.
-- The viewport MUST match the terminal resolution and orientation exactly.
-- Device pixel ratio MUST be 1.0.
+### 2.3 Receiver Implementer Checklist
+- Parse AAD header fields and derive the nonce from session_id and shard_index.
+- Reject any shard that fails AEAD verification.
+- Enforce monotonic session_id and persist the highest accepted value.
+- Collect shards until FEC recovery is possible; then reconstruct the frame.
+- If recovery fails, keep the previous frame and schedule the next wake.
 
-### 3.2 Rendering Rules
-- Rendering MUST be headless and deterministic for the same inputs.
-- Default background MUST be solid white (#FFFFFF) unless explicitly set.
-- Subpixel rendering MUST be disabled; use whole-pixel rasterization.
-- Color space MUST be sRGB for inputs, then converted to linear luminance for quantization.
+## 3. FIUDP Protocol Specification (v1)
 
-### 3.3 Quantization and Dithering
-- Convert RGB to linear luminance using standard sRGB transfer.
-- Monochrome output uses a fixed threshold or ordered dithering.
-- Grayscale output uses 4-bit (16 levels) quantization with optional error diffusion.
-- Dithering is permitted but MUST be deterministic.
-
-### 3.4 BMP Output Requirements
-
-Canonical output is Windows BMP v3 (BITMAPINFOHEADER), uncompressed.
-
-Required properties:
-- Byte order: little-endian for all header fields.
-- Compression: BI_RGB (0), no compression.
-- Resolution: fixed to the terminal panel dimensions.
-- Orientation: top-down DIB (negative height) to avoid vertical flip.
-
-Bit depth:
-- MUST support 1-bit monochrome.
-- MAY support 4-bit grayscale (16 levels).
-
-Row padding:
-- Each row MUST be padded to a 4-byte boundary.
-
-BMP file structure:
-
-| Section | Size (bytes) | Notes |
-| --- | --- | --- |
-| BITMAPFILEHEADER | 14 | Standard BMP file header |
-| BITMAPINFOHEADER | 40 | DIB header (v3) |
-| Color Table | 8 or 64 | 2 entries for 1-bit, 16 entries for 4-bit |
-| Pixel Array | variable | Rows padded to 4-byte boundary |
-
-BITMAPFILEHEADER layout:
-
-| Offset | Size | Field | Value |
-| --- | --- | --- | --- |
-| 0 | 2 | bfType | 0x4D42 ("BM") |
-| 2 | 4 | bfSize | Total file size |
-| 6 | 2 | bfReserved1 | 0 |
-| 8 | 2 | bfReserved2 | 0 |
-| 10 | 4 | bfOffBits | Pixel array offset |
-
-BITMAPINFOHEADER layout:
-
-| Offset | Size | Field | Value |
-| --- | --- | --- | --- |
-| 0 | 4 | biSize | 40 |
-| 4 | 4 | biWidth | Panel width (pixels) |
-| 8 | 4 | biHeight | Negative panel height (pixels) |
-| 12 | 2 | biPlanes | 1 |
-| 14 | 2 | biBitCount | 1 or 4 |
-| 16 | 4 | biCompression | 0 (BI_RGB) |
-| 20 | 4 | biSizeImage | Pixel array size |
-| 24 | 4 | biXPelsPerMeter | 0 |
-| 28 | 4 | biYPelsPerMeter | 0 |
-| 32 | 4 | biClrUsed | 0 (default) |
-| 36 | 4 | biClrImportant | 0 |
-
-Color table:
-- 1-bit: [0x00,0x00,0x00,0x00] for black and [0xFF,0xFF,0xFF,0x00] for white.
-- 4-bit: 16 entries from black to white in linear luminance order.
-
-### 3.5 Frame Byte Stream
-- The transmitted frame is the raw BMP byte stream as produced above.
-- No additional container or metadata is prefixed.
-- Frame length is therefore deterministic for a given resolution and bit depth.
-
-## 4. FIUDP Protocol Specification (v1)
-
-### 4.1 Transport and Session Model
+### 3.1 Transport and Session Model
 - Transport is UDP, unidirectional.
 - Default port is 5050.
 - A session is a single burst of packets carrying one full frame.
 - The sender does not wait for acknowledgements by default.
+- The sender MUST use a strictly increasing session_id and persist it across runs.
+- If session_id is close to wrap-around, the sender MUST rotate the PSK before reuse.
 
-### 4.2 Sharding and FEC
+### 3.2 Sharding and FEC
 - Shard size is fixed at 1400 bytes.
 - The frame byte stream is padded with zeros to a multiple of 1400.
 - data_shards = frame_len / 1400.
 - parity_shards = ceil(data_shards * parity_ratio / 100).
 - total_shards = data_shards + parity_shards (MUST be <= 65535).
 - Reed-Solomon over GF(2^8) is used to generate parity shards.
-- Parity ratio is provisioned out-of-band (CLI config and terminal config MUST match).
+- data_shards and parity_shards are carried in authenticated metadata per packet.
+- parity_ratio MAY be changed per session; the receiver MUST use data_shards and parity_shards from the header.
 
-### 4.3 Cryptographic Envelope
+### 3.3 Cryptographic Envelope
 - AEAD: ChaCha20-Poly1305.
 - Key: 32-byte PSK, provisioned out-of-band.
-- Nonce: 12 bytes, unique per shard within a key.
-- AAD: session_id, shard_index, rendezvous_secs (8 bytes total).
+- Nonce: 12 bytes. For data packets, the nonce is deterministic: session_id (2) || shard_index (2) || 0x0000000000000000 (8). The nonce is not transmitted for data packets.
+- AAD: session_id, shard_index, data_shards, parity_shards, rendezvous_secs (12 bytes total).
 - The AEAD tag is 16 bytes and appended in the packet header.
+- Receipt packets MAY use a random nonce and include it as specified in section 3.6.
 
-### 4.4 Packet Format
-Each UDP packet is exactly 1436 bytes.
+### 3.4 Packet Format
+Each UDP packet is exactly 1428 bytes.
 
 | Offset | Size | Field | Encoding | Authenticated | Encrypted |
 | --- | --- | --- | --- | --- | --- |
 | 0 | 2 | session_id | u16, big-endian | Yes (AAD) | No |
 | 2 | 2 | shard_index | u16, big-endian | Yes (AAD) | No |
-| 4 | 4 | rendezvous_secs | u32, big-endian | Yes (AAD) | No |
-| 8 | 12 | nonce | 96-bit random | No | No |
-| 20 | 16 | tag | Poly1305 tag | No | No |
-| 36 | 1400 | payload | shard ciphertext | Yes (AEAD) | Yes |
+| 4 | 2 | data_shards | u16, big-endian | Yes (AAD) | No |
+| 6 | 2 | parity_shards | u16, big-endian | Yes (AAD) | No |
+| 8 | 4 | rendezvous_secs | u32, big-endian | Yes (AAD) | No |
+| 12 | 16 | tag | Poly1305 tag | No | No |
+| 28 | 1400 | payload | shard ciphertext | Yes (AEAD) | Yes |
 
 Notes:
 - session_id groups shards belonging to the same frame transmission.
 - shard_index is a 0-based index across data and parity shards.
+- data_shards and parity_shards describe the FEC layout for the session.
 - rendezvous_secs communicates the next intended wake window.
+- nonce is derived from session_id and shard_index; it is not transmitted.
 - There is no version or magic field to minimize overhead.
 
-### 4.5 Receiver Behavior
+### 3.5 Receiver Behavior
 - The receiver MUST validate the AEAD tag before accepting a shard.
 - Shards with invalid tags MUST be discarded silently.
+- The receiver MUST track the highest successfully processed session_id. Any shard belonging to a session_id less than or equal to the tracked value MUST be silently discarded to prevent replay attacks. Successfully processed means a frame was authenticated, reconstructed, and accepted for display.
+- The receiver SHOULD persist the last accepted session_id across reboots where feasible.
 - The receiver MUST group shards by session_id and shard_index.
-- data_shards and parity_shards are derived from known frame length and configured parity ratio.
+- data_shards and parity_shards MUST be read from authenticated header metadata and MUST remain consistent across all shards in a session. Inconsistent values MUST be discarded.
 - When sufficient shards are present, the receiver MUST attempt FEC recovery.
 - If recovery fails, the receiver MUST keep the previous frame and schedule the next wake.
 
@@ -188,7 +136,7 @@ Rendezvous handling:
 - rendezvous_secs is advisory and represents the next desired wake time in seconds.
 - A value of 0 indicates no change to the existing wake schedule.
 
-### 4.6 Optional Receipt Response
+### 3.6 Optional Receipt Response
 A receipt is OPTIONAL and intended for lab or debugging use. Production deployments SHOULD disable receipts to minimize radio time.
 
 Receipt packet (if used):
@@ -208,49 +156,27 @@ Receipt security:
 - The receipt payload (bytes 0-11) MUST be authenticated with ChaCha20-Poly1305.
 - The same PSK is used; AAD is session_id (2 bytes).
 
-### 4.7 Error Handling and Power Discipline
+### 3.7 Error Handling and Power Discipline
 - The sender does not retransmit; FEC is the primary loss mitigation.
 - The receiver SHOULD keep its radio on only for a bounded window sized to total_shards and inter-packet delay.
 - On failure, the receiver SHOULD preserve the previous frame and report the failure locally (optional).
 - The system MUST avoid indefinite awake states or network retries.
 
-## 5. Architecture and Directory Layout
-
-Target repository layout:
-
-```
-/README.md
-/SPEC.md
-/assets/
-/src/
-  lib.rs
-  main.rs
-/compiler/
-  renderer/
-  quantizer/
-  bmp/
-/protocol/
-  fiudp/
-/spec/
-  fixtures/
-/examples/
-  html/
-  bmp/
-/tools/
-```
-
-Directory intent:
-- /compiler contains the HTML-to-BMP pipeline implementation.
-- /protocol contains transport-level parsers and validators.
-- /spec contains test vectors, fixtures, and conformance data.
-- /examples contains reference HTML templates and known-good BMP outputs.
-
-## 6. Conformance Targets
-- A compliant sender MUST produce packets that match the byte layout in section 4.4.
-- A compliant terminal MUST reject unauthenticated shards and MUST validate AAD.
-- A compliant compiler MUST generate BMPs matching section 3.4.
-
-## 7. Security Notes
-- Nonce uniqueness is critical. Implementations MUST ensure no reuse under the same key.
+## 4. Security Notes
+- Nonce uniqueness is critical. For data packets, nonce derivation depends on session_id and shard_index, so session_id MUST NOT repeat under the same key and shard_index MUST be unique within a session.
 - Keys MUST be provisioned out-of-band and rotated by a trusted process.
 - Side-channel metadata (IP, timing) is not hidden by the protocol and MUST be considered in threat models.
+
+## 5. Compatibility and Versioning
+- FIUDP v1 is fixed-field and versioned out-of-band.
+- Implementations SHOULD treat any format changes as a new spec version and update both endpoints together.
+
+## 6. FAQ
+Q: Does FIUDP define the image format?
+A: No. FIUDP transports opaque bytes. Use whatever rendering pipeline produces the terminal-native frame.
+
+Q: Is there a broker or handshake?
+A: No. FIUDP is one-way UDP with optional receipts for lab use.
+
+Q: Why not use MQTT or a generic IoT protocol?
+A: FIUDP optimizes for minimal overhead, deterministic timing, and long deep-sleep cycles.
