@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "FIUDP sender CLI"
+repository = "https://github.com/Thiru-sama/Fin-Amor-s-Ideal-UDP-FIUDP-CLI"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
