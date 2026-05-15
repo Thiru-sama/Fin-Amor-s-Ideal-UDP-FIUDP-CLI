@@ -43,7 +43,12 @@ pub struct Args {
     target: Ipv4Addr,
 
     /// Wake-up timer in seconds for the next sync cycle
-    #[arg(short = 'w', long = "wake-at", alias = "rendezvous", value_name = "SECS")]
+    #[arg(
+        short = 'w',
+        long = "wake-at",
+        alias = "rendezvous",
+        value_name = "SECS"
+    )]
     wake_at: u32,
 
     /// Path to the 256-bit (32 bytes) pre-shared key file
@@ -55,7 +60,12 @@ pub struct Args {
     image: Option<PathBuf>,
 
     /// Percentage of parity shards to generate
-    #[arg(short = 'p', long = "parity-ratio", default_value_t = 15, value_name = "PERCENT")]
+    #[arg(
+        short = 'p',
+        long = "parity-ratio",
+        default_value_t = 15,
+        value_name = "PERCENT"
+    )]
     parity_ratio: u8,
 
     /// UDP port of the TRMNL receiver
@@ -109,13 +119,7 @@ pub fn run(config: Config) -> Result<()> {
     let fec = ReedSolomonEngine;
     let sender = UdpPacketSender::new(config.target_ip, config.target_port)?;
 
-    let pipeline = FiudpSender::new(
-        reader,
-        fec,
-        encryptor,
-        sender,
-        config.delay,
-    );
+    let pipeline = FiudpSender::new(reader, fec, encryptor, sender, config.delay);
 
     pipeline.send(config.parity_ratio, config.rendezvous_secs)
 }
@@ -130,7 +134,7 @@ impl ParityRatio {
         }
 
         let numerator = data_shards.saturating_mul(self.0 as usize);
-        (numerator + 99) / 100
+        numerator.div_ceil(100)
     }
 }
 
@@ -291,7 +295,11 @@ impl PacketBuilder {
         payload: &[u8],
     ) -> Result<()> {
         if payload.len() != SHARD_SIZE {
-            bail!("invalid shard size {}, expected {}", payload.len(), SHARD_SIZE);
+            bail!(
+                "invalid shard size {}, expected {}",
+                payload.len(),
+                SHARD_SIZE
+            );
         }
 
         out[..AAD_SIZE].copy_from_slice(aad);
@@ -436,7 +444,8 @@ fn pad_to_shard_size(buf: &mut Vec<u8>) {
 }
 
 fn read_key(path: &Path) -> Result<[u8; 32]> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read key file {}", path.display()))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("failed to read key file {}", path.display()))?;
     if bytes.len() != 32 {
         bail!("key file must contain exactly 32 bytes");
     }
