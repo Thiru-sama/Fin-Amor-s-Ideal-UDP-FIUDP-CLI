@@ -1,0 +1,19 @@
+[package]
+name = "fiudp-cli"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "FIUDP sender CLI"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+chacha20poly1305 = "0.10"
+reed-solomon-erasure = "6.0"
+rand = "0.8"
+anyhow = "1.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
