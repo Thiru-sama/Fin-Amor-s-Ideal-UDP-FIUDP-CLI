@@ -34,7 +34,7 @@ cargo install fiudp-cli
 
 ### From source
 ```sh
-git clone https://github.com/<org>/fiudp-cli.git
+git clone https://github.com/Thiru-sama/Fin-Amor-s-Ideal-UDP-FIUDP-CLI.git
 cd fiudp-cli
 cargo install --path .
 ```
