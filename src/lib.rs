@@ -21,11 +21,8 @@ const SESSION_ID_SIZE: usize = 2;
 const SHARD_INDEX_SIZE: usize = 2;
 const DATA_SHARDS_SIZE: usize = 2;
 const PARITY_SHARDS_SIZE: usize = 2;
-const AAD_SIZE: usize = SESSION_ID_SIZE
-    + SHARD_INDEX_SIZE
-    + DATA_SHARDS_SIZE
-    + PARITY_SHARDS_SIZE
-    + RENDEZVOUS_SIZE;
+const AAD_SIZE: usize =
+    SESSION_ID_SIZE + SHARD_INDEX_SIZE + DATA_SHARDS_SIZE + PARITY_SHARDS_SIZE + RENDEZVOUS_SIZE;
 const HEADER_SIZE: usize = AAD_SIZE + TAG_SIZE;
 const PACKET_SIZE: usize = HEADER_SIZE + SHARD_SIZE;
 
@@ -230,15 +227,16 @@ impl SessionIdStore {
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to read session_id file {}", self.path.display()))
+                return Err(err).with_context(|| {
+                    format!("failed to read session_id file {}", self.path.display())
+                })
             }
         };
 
         let next = match current {
-            Some(value) => value
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("session_id overflow; rotate PSK and reset receiver state"))?,
+            Some(value) => value.checked_add(1).ok_or_else(|| {
+                anyhow!("session_id overflow; rotate PSK and reset receiver state")
+            })?,
             None => 1,
         };
 
@@ -449,10 +447,10 @@ where
             bail!("total shards {} exceeds u16 limit", total_shards);
         }
 
-        let data_shards_u16 = u16::try_from(data_shards)
-            .context("data_shards exceeds u16 limit")?;
-        let parity_shards_u16 = u16::try_from(parity_shards)
-            .context("parity_shards exceeds u16 limit")?;
+        let data_shards_u16 =
+            u16::try_from(data_shards).context("data_shards exceeds u16 limit")?;
+        let parity_shards_u16 =
+            u16::try_from(parity_shards).context("parity_shards exceeds u16 limit")?;
 
         let mut parity_buffers = Vec::with_capacity(parity_shards);
         for _ in 0..parity_shards {
@@ -468,8 +466,12 @@ where
             self.fec.encode(data_shards, parity_shards, &mut shards)?;
         }
 
-        let packet_builder =
-            PacketBuilder::new(session_id, rendezvous_secs, data_shards_u16, parity_shards_u16);
+        let packet_builder = PacketBuilder::new(
+            session_id,
+            rendezvous_secs,
+            data_shards_u16,
+            parity_shards_u16,
+        );
         let mut packet = [0u8; PACKET_SIZE];
 
         let shard_count = shards.len();
