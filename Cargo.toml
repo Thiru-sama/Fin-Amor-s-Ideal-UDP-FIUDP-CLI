@@ -2,10 +2,14 @@
 name = "fiudp-cli"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.73"
 license = "GPL-3.0-only"
-description = "FIUDP sender CLI"
+description = "Unidirectional UDP sender for TRMNL e-paper displays — FEC + ChaCha20-Poly1305 AEAD"
 repository = "https://github.com/Thiru-sama/Fin-Amor-s-Ideal-UDP-FIUDP-CLI"
 readme = "README.md"
+keywords = ["udp", "fiudp", "e-ink", "fec", "chacha20"]
+categories = ["command-line-utilities", "network-programming", "cryptography"]
+
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }

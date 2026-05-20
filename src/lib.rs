@@ -1,4 +1,98 @@
+//! # fiudp-cli
+//!
+//! Unidirectional UDP sender implementing the **FIUDP protocol** for
+//! streaming raw image frames to TRMNL-class e-paper displays.
+//!
+//! ## Overview
+//!
+//! `fiudp-cli` reads an opaque byte stream (typically a raw BMP frame),
+//! applies **Reed-Solomon forward error correction** (FEC), encrypts each
+//! shard with **ChaCha20-Poly1305** authenticated encryption, and streams
+//! the resulting packets over UDP in a single burst.
+//!
+//! The protocol is stateless and one-way: no handshake, no acknowledgements,
+//! no keep-alive. The only persistent state is a monotonically increasing
+//! session identifier stored alongside the pre-shared key file.
+//!
+//! ## Public API
+//!
+//! The library exposes three items for integration as a Rust dependency:
+//!
+//! - [`Args`] — CLI argument struct (derives [`clap::Parser`]).
+//! - [`Config`] — Validated configuration built from `Args` via
+//!   [`TryFrom<Args>`].
+//! - [`run`] — Executes the full FIUDP send pipeline.
+//!
+//! ### Quick start
+//!
+//! ```rust,no_run
+//! use fiudp_cli::{Args, Config, run};
+//! use clap::Parser;
+//!
+//! let args = Args::parse();
+//! let config = Config::try_from(args).expect("invalid arguments");
+//! run(config).expect("send failed");
+//! ```
+//!
+//! ### Programmatic construction
+//!
+//! If you are embedding the sender in a larger application and want to
+//! bypass the CLI parser, build [`Args`] directly and convert:
+//!
+//! ```rust,no_run
+//! use std::net::Ipv4Addr;
+//! use std::path::PathBuf;
+//! use clap::Parser;
+//! use fiudp_cli::{Args, Config, run};
+//!
+//! // Construct Args manually (fields match CLI flags).
+//! let args = Args::try_parse_from([
+//!     "fiudp-cli",
+//!     "--target", "192.168.1.42",
+//!     "--wake-at", "3600",
+//!     "--key-file", "./psk.bin",
+//!     "--image", "./frame.raw",
+//! ]).unwrap();
+//!
+//! let config = Config::try_from(args).unwrap();
+//! run(config).unwrap();
+//! ```
+//!
+//! ## Wire format
+//!
+//! Each UDP packet is exactly [`PACKET_SIZE`] (1 428) bytes:
+//!
+//! | Offset | Size | Field              | Encoding         |
+//! |--------|------|--------------------|------------------|
+//! | 0      | 2    | `session_id`       | u16 big-endian   |
+//! | 2      | 2    | `shard_index`      | u16 big-endian   |
+//! | 4      | 2    | `data_shards`      | u16 big-endian   |
+//! | 6      | 2    | `parity_shards`    | u16 big-endian   |
+//! | 8      | 4    | `rendezvous_secs`  | u32 big-endian   |
+//! | 12     | 16   | AEAD tag           | Poly1305         |
+//! | 28     | 1400 | shard ciphertext   | ChaCha20         |
+//!
+//! The nonce is **not** transmitted; it is derived deterministically:
+//! `session_id (2) ‖ shard_index (2) ‖ 0x00…00 (8)`.
+//!
+//! ## Security considerations
+//!
+//! - Uses a **256-bit pre-shared key** (PSK) for ChaCha20-Poly1305.
+//! - Header fields are authenticated as Additional Authenticated Data (AAD);
+//!   tampering triggers an authentication failure on the receiver.
+//! - **Session IDs are monotonically increasing** to prevent replay attacks.
+//!   When `session_id` approaches `u16::MAX`, the PSK must be rotated.
+//! - The protocol does **not** hide metadata (IP addresses, timing).
+//!
+//! ## Feature flags
+//!
+//! None. The crate has no optional features.
+//!
+//! For the full protocol specification, see
+//! [`SPEC.md`](https://github.com/Thiru-sama/Fin-Amor-s-Ideal-UDP-FIUDP-CLI/blob/main/SPEC.md).
+
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 use std::fs;
 use std::io::{self, Read};
@@ -13,30 +107,87 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use clap::Parser;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
-const SHARD_SIZE: usize = 1400;
-const NONCE_SIZE: usize = 12;
-const TAG_SIZE: usize = 16;
-const RENDEZVOUS_SIZE: usize = 4;
-const SESSION_ID_SIZE: usize = 2;
-const SHARD_INDEX_SIZE: usize = 2;
-const DATA_SHARDS_SIZE: usize = 2;
-const PARITY_SHARDS_SIZE: usize = 2;
-const AAD_SIZE: usize =
+/// Fixed shard payload size in bytes (1 400).
+///
+/// Each shard — whether data or parity — occupies exactly this many bytes
+/// in the packet payload. Input frames are zero-padded to a multiple of
+/// this value before FEC encoding.
+pub const SHARD_SIZE: usize = 1400;
+
+/// AEAD nonce length in bytes (12, per the ChaCha20-Poly1305 spec).
+pub const NONCE_SIZE: usize = 12;
+
+/// AEAD authentication tag length in bytes (16, Poly1305).
+pub const TAG_SIZE: usize = 16;
+
+/// Size of the `rendezvous_secs` header field in bytes.
+pub const RENDEZVOUS_SIZE: usize = 4;
+
+/// Size of the `session_id` header field in bytes.
+pub const SESSION_ID_SIZE: usize = 2;
+
+/// Size of the `shard_index` header field in bytes.
+pub const SHARD_INDEX_SIZE: usize = 2;
+
+/// Size of the `data_shards` header field in bytes.
+pub const DATA_SHARDS_SIZE: usize = 2;
+
+/// Size of the `parity_shards` header field in bytes.
+pub const PARITY_SHARDS_SIZE: usize = 2;
+
+/// Total size of the AAD (Additional Authenticated Data) region in bytes.
+///
+/// This is the concatenation of `session_id`, `shard_index`, `data_shards`,
+/// `parity_shards`, and `rendezvous_secs` — 12 bytes total.
+pub const AAD_SIZE: usize =
     SESSION_ID_SIZE + SHARD_INDEX_SIZE + DATA_SHARDS_SIZE + PARITY_SHARDS_SIZE + RENDEZVOUS_SIZE;
-const HEADER_SIZE: usize = AAD_SIZE + TAG_SIZE;
-const PACKET_SIZE: usize = HEADER_SIZE + SHARD_SIZE;
+
+/// Total header size in bytes (AAD + AEAD tag = 28).
+pub const HEADER_SIZE: usize = AAD_SIZE + TAG_SIZE;
+
+/// Total UDP packet size in bytes (header + shard payload = 1 428).
+pub const PACKET_SIZE: usize = HEADER_SIZE + SHARD_SIZE;
+
+/// Byte offset of `session_id` within the packet header.
+pub const SESSION_ID_OFFSET: usize = 0;
+
+/// Byte offset of `shard_index` within the packet header.
+pub const SHARD_INDEX_OFFSET: usize = SESSION_ID_OFFSET + SESSION_ID_SIZE;
+
+/// Byte offset of `data_shards` within the packet header.
+pub const DATA_SHARDS_OFFSET: usize = SHARD_INDEX_OFFSET + SHARD_INDEX_SIZE;
+
+/// Byte offset of `parity_shards` within the packet header.
+pub const PARITY_SHARDS_OFFSET: usize = DATA_SHARDS_OFFSET + DATA_SHARDS_SIZE;
+
+/// Byte offset of `rendezvous_secs` within the packet header.
+pub const RENDEZVOUS_OFFSET: usize = PARITY_SHARDS_OFFSET + PARITY_SHARDS_SIZE;
+
+/// Byte offset of the AEAD authentication tag within the packet header.
+pub const TAG_OFFSET: usize = RENDEZVOUS_OFFSET + RENDEZVOUS_SIZE;
+
+/// Byte offset of the encrypted shard payload within the packet.
+pub const PAYLOAD_OFFSET: usize = TAG_OFFSET + TAG_SIZE;
 
 const DEFAULT_UDP_PORT: u16 = 5050;
 const DEFAULT_INTER_PACKET_DELAY_US: u64 = 500;
 
-const SESSION_ID_OFFSET: usize = 0;
-const SHARD_INDEX_OFFSET: usize = SESSION_ID_OFFSET + SESSION_ID_SIZE;
-const DATA_SHARDS_OFFSET: usize = SHARD_INDEX_OFFSET + SHARD_INDEX_SIZE;
-const PARITY_SHARDS_OFFSET: usize = DATA_SHARDS_OFFSET + DATA_SHARDS_SIZE;
-const RENDEZVOUS_OFFSET: usize = PARITY_SHARDS_OFFSET + PARITY_SHARDS_SIZE;
-const TAG_OFFSET: usize = RENDEZVOUS_OFFSET + RENDEZVOUS_SIZE;
-const PAYLOAD_OFFSET: usize = TAG_OFFSET + TAG_SIZE;
 
+
+/// Command-line arguments for the FIUDP sender.
+///
+/// This struct derives [`clap::Parser`] and maps directly to the CLI flags
+/// documented in the project README. Use [`Config::try_from`] to validate
+/// and convert these arguments into a [`Config`] suitable for [`run`].
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use clap::Parser;
+/// use fiudp_cli::Args;
+///
+/// let args = Args::parse();
+/// ```
 #[derive(Parser, Debug)]
 #[command(name = "fiudp-cli", version, about = "FIUDP unidirectional UDP sender")]
 pub struct Args {
@@ -79,14 +230,31 @@ pub struct Args {
     delay_us: u64,
 }
 
+/// Validated sender configuration.
+///
+/// Built from [`Args`] via the [`TryFrom<Args>`] implementation, which
+/// validates the parity ratio (0–100 %) and resolves the input source.
+///
+/// Pass this to [`run`] to execute the FIUDP send pipeline.
+///
+/// # Errors
+///
+/// Construction fails ([`TryFrom::try_from`]) if `parity_ratio` is > 100.
 #[derive(Debug)]
 pub struct Config {
+    /// Destination IPv4 address of the TRMNL display.
     target_ip: Ipv4Addr,
+    /// Seconds until the terminal's next wake window.
     rendezvous_secs: u32,
+    /// Path to the 32-byte pre-shared key file.
     key_path: PathBuf,
+    /// Where to read the input frame from (file or stdin).
     input: InputSource,
+    /// Percentage of parity shards relative to data shards.
     parity_ratio: ParityRatio,
+    /// UDP port on the target device.
     target_port: u16,
+    /// Delay injected between consecutive UDP sends.
     delay: Duration,
 }
 
@@ -112,6 +280,36 @@ impl TryFrom<Args> for Config {
     }
 }
 
+/// Execute the full FIUDP send pipeline.
+///
+/// This is the primary entry point for the library. Given a validated
+/// [`Config`], it will:
+///
+/// 1. Read the input frame (from file or stdin).
+/// 2. Load the 256-bit pre-shared key and advance the session counter.
+/// 3. Pad the frame to a multiple of [`SHARD_SIZE`] bytes.
+/// 4. Compute Reed-Solomon parity shards.
+/// 5. Encrypt each shard in-place with ChaCha20-Poly1305.
+/// 6. Send all packets over UDP with the configured inter-packet delay.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The key file cannot be read or is not exactly 32 bytes.
+/// - The input source is empty or unreadable.
+/// - The session ID counter overflows `u16::MAX` (rotate the PSK).
+/// - A UDP send fails.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use fiudp_cli::{Args, Config, run};
+/// use clap::Parser;
+///
+/// let args = Args::parse();
+/// let config = Config::try_from(args).unwrap();
+/// run(config).unwrap();
+/// ```
 pub fn run(config: Config) -> Result<()> {
     let reader = config.input;
     let key_path = config.key_path.clone();
