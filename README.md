@@ -1,5 +1,8 @@
 # FIUDP CLI
 
+[![CI](https://github.com/Thiru-sama/Fin-Amor-s-Ideal-UDP-FIUDP-CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/Thiru-sama/Fin-Amor-s-Ideal-UDP-FIUDP-CLI/actions/workflows/ci.yml)
+[![docs.rs](https://docs.rs/fiudp-cli/badge.svg)](https://docs.rs/fiudp-cli)
+
 Small, sharp Rust tool that streams a raw image to a TRMNL display IP over FIUDP. It applies FEC and AEAD encryption (ChaCha20-Poly1305) with a 256-bit pre-shared key, and is designed to compose well with other Unix tools.
 
 Purpose-built for TRMNL and other e-ink terminals: stateless UDP transport for raw BMP frames, one burst per frame, secure and deterministic.

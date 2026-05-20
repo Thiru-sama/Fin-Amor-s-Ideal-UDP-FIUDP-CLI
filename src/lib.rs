@@ -16,14 +16,16 @@
 //!
 //! ## Public API
 //!
-//! The library exposes three items for integration as a Rust dependency:
+//! The library exposes these items for integration as a Rust dependency:
 //!
 //! - [`Args`] — CLI argument struct (derives [`clap::Parser`]).
 //! - [`Config`] — Validated configuration built from `Args` via
-//!   [`TryFrom<Args>`].
+//!   [`TryFrom<Args>`], or programmatically via [`ConfigBuilder`].
+//! - [`ConfigBuilder`] — Builder for [`Config`] without clap parsing.
 //! - [`run`] — Executes the full FIUDP send pipeline.
+//! - [`FiudpError`] — Typed error enum for all failure modes.
 //!
-//! ### Quick start
+//! ### Quick start (CLI)
 //!
 //! ```rust,no_run
 //! use fiudp_cli::{Args, Config, run};
@@ -34,27 +36,20 @@
 //! run(config).expect("send failed");
 //! ```
 //!
-//! ### Programmatic construction
-//!
-//! If you are embedding the sender in a larger application and want to
-//! bypass the CLI parser, build [`Args`] directly and convert:
+//! ### Programmatic construction (no clap)
 //!
 //! ```rust,no_run
 //! use std::net::Ipv4Addr;
-//! use std::path::PathBuf;
-//! use clap::Parser;
-//! use fiudp_cli::{Args, Config, run};
+//! use fiudp_cli::{Config, run};
 //!
-//! // Construct Args manually (fields match CLI flags).
-//! let args = Args::try_parse_from([
-//!     "fiudp-cli",
-//!     "--target", "192.168.1.42",
-//!     "--wake-at", "3600",
-//!     "--key-file", "./psk.bin",
-//!     "--image", "./frame.raw",
-//! ]).unwrap();
+//! let config = Config::builder()
+//!     .target(Ipv4Addr::new(192, 168, 1, 42))
+//!     .wake_at(3600)
+//!     .key_file("./psk.bin")
+//!     .image("./frame.raw")
+//!     .build()
+//!     .unwrap();
 //!
-//! let config = Config::try_from(args).unwrap();
 //! run(config).unwrap();
 //! ```
 //!
@@ -101,11 +96,97 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use clap::Parser;
 use reed_solomon_erasure::galois_8::ReedSolomon;
+
+/// Typed error enum for all fallible operations in the FIUDP sender.
+///
+/// Unlike opaque error types, `FiudpError` lets downstream consumers
+/// `match` on specific failure modes and handle them programmatically.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use fiudp_cli::{Args, Config, run, FiudpError};
+/// use clap::Parser;
+///
+/// let args = Args::parse();
+/// let config = Config::try_from(args).unwrap();
+/// match run(config) {
+///     Ok(()) => println!("sent"),
+///     Err(FiudpError::EmptyInput) => eprintln!("nothing to send"),
+///     Err(e) => eprintln!("error: {e}"),
+/// }
+/// ```
+#[derive(Debug, thiserror::Error)]
+pub enum FiudpError {
+    /// Parity ratio exceeds the valid range of 0–100.
+    #[error("invalid parity ratio {0}: must be 0–100")]
+    InvalidParityRatio(u8),
+
+    /// The key file does not contain exactly 32 bytes.
+    #[error("key file must contain exactly 32 bytes, got {0}")]
+    InvalidKeyLength(usize),
+
+    /// The session ID file exists but does not contain exactly 2 bytes.
+    #[error("session_id file must contain exactly 2 bytes")]
+    InvalidSessionFile,
+
+    /// The monotonic session counter reached `u16::MAX`.
+    ///
+    /// Rotate the PSK and reset the receiver before continuing.
+    #[error("session_id overflow (u16::MAX reached); rotate PSK and reset receiver state")]
+    SessionIdOverflow,
+
+    /// The input frame is empty (zero bytes).
+    #[error("input is empty")]
+    EmptyInput,
+
+    /// The total number of shards (data + parity) exceeds `u16::MAX`.
+    #[error("total shards {0} exceeds u16 limit")]
+    TooManyShards(usize),
+
+    /// A shard payload has an unexpected size (internal invariant violation).
+    #[error("invalid shard size {actual}, expected {expected}")]
+    InvalidShardSize {
+        /// Actual size received.
+        actual: usize,
+        /// Expected [`SHARD_SIZE`].
+        expected: usize,
+    },
+
+    /// A UDP send wrote fewer bytes than the full packet.
+    #[error("short UDP send: {sent} of {expected} bytes")]
+    ShortSend {
+        /// Bytes actually sent.
+        sent: usize,
+        /// Bytes expected to send.
+        expected: usize,
+    },
+
+    /// ChaCha20-Poly1305 encryption failed.
+    #[error("encryption failed: {0}")]
+    Encryption(String),
+
+    /// Reed-Solomon FEC encoding failed.
+    #[error("FEC encoding failed: {0}")]
+    Fec(String),
+
+    /// An I/O operation failed, with context describing which operation.
+    #[error("{context}")]
+    Io {
+        /// Human-readable description of the failed operation.
+        context: String,
+        /// The underlying I/O error.
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// Convenience alias used throughout the crate.
+pub type Result<T> = std::result::Result<T, FiudpError>;
 
 /// Fixed shard payload size in bytes (1 400).
 ///
@@ -232,14 +313,14 @@ pub struct Args {
 
 /// Validated sender configuration.
 ///
-/// Built from [`Args`] via the [`TryFrom<Args>`] implementation, which
-/// validates the parity ratio (0–100 %) and resolves the input source.
+/// Can be built from [`Args`] via [`TryFrom<Args>`], or programmatically
+/// via [`ConfigBuilder`] (see [`Config::builder`]).
 ///
 /// Pass this to [`run`] to execute the FIUDP send pipeline.
 ///
 /// # Errors
 ///
-/// Construction fails ([`TryFrom::try_from`]) if `parity_ratio` is > 100.
+/// Construction fails if `parity_ratio` is > 100.
 #[derive(Debug)]
 pub struct Config {
     /// Destination IPv4 address of the TRMNL display.
@@ -258,8 +339,30 @@ pub struct Config {
     delay: Duration,
 }
 
+impl Config {
+    /// Create a [`ConfigBuilder`] for programmatic construction.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::net::Ipv4Addr;
+    /// use fiudp_cli::Config;
+    ///
+    /// let config = Config::builder()
+    ///     .target(Ipv4Addr::new(192, 168, 1, 42))
+    ///     .wake_at(3600)
+    ///     .key_file("./psk.bin")
+    ///     .image("./frame.raw")
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    pub fn builder() -> ConfigBuilder {
+        ConfigBuilder::default()
+    }
+}
+
 impl TryFrom<Args> for Config {
-    type Error = anyhow::Error;
+    type Error = FiudpError;
 
     fn try_from(args: Args) -> Result<Self> {
         let parity_ratio = ParityRatio::try_from(args.parity_ratio)?;
@@ -276,6 +379,85 @@ impl TryFrom<Args> for Config {
             parity_ratio,
             target_port: args.port,
             delay: Duration::from_micros(args.delay_us),
+        })
+    }
+}
+
+/// Builder for [`Config`] that does not require [`clap`] parsing.
+///
+/// Use [`Config::builder`] to create an instance.
+///
+/// # Required fields
+///
+/// - [`target`](ConfigBuilder::target) — destination IPv4.
+/// - [`wake_at`](ConfigBuilder::wake_at) — rendezvous seconds.
+/// - [`key_file`](ConfigBuilder::key_file) — path to the 32-byte PSK.
+///
+/// All other fields have sensible defaults matching the CLI.
+#[derive(Debug)]
+pub struct ConfigBuilder {
+    target_ip: Option<Ipv4Addr>,
+    rendezvous_secs: Option<u32>,
+    key_path: Option<PathBuf>,
+    image: Option<PathBuf>,
+    parity_ratio: u8,
+    port: u16,
+    delay_us: u64,
+}
+
+impl Default for ConfigBuilder {
+    fn default() -> Self {
+        Self {
+            target_ip: None,
+            rendezvous_secs: None,
+            key_path: None,
+            image: None,
+            parity_ratio: 15,
+            port: DEFAULT_UDP_PORT,
+            delay_us: DEFAULT_INTER_PACKET_DELAY_US,
+        }
+    }
+}
+
+impl ConfigBuilder {
+    /// Set the destination IPv4 address (**required**).
+    pub fn target(mut self, ip: Ipv4Addr) -> Self { self.target_ip = Some(ip); self }
+    /// Set the rendezvous timer in seconds (**required**).
+    pub fn wake_at(mut self, secs: u32) -> Self { self.rendezvous_secs = Some(secs); self }
+    /// Set the path to the 32-byte PSK file (**required**).
+    pub fn key_file(mut self, path: impl Into<PathBuf>) -> Self { self.key_path = Some(path.into()); self }
+    /// Set the input image file path. If omitted, reads from stdin.
+    pub fn image(mut self, path: impl Into<PathBuf>) -> Self { self.image = Some(path.into()); self }
+    /// Set the parity ratio percentage (0–100, default 15).
+    pub fn parity_ratio(mut self, percent: u8) -> Self { self.parity_ratio = percent; self }
+    /// Set the UDP port (default 5050).
+    pub fn port(mut self, port: u16) -> Self { self.port = port; self }
+    /// Set the inter-packet delay in microseconds (default 500).
+    pub fn delay_us(mut self, us: u64) -> Self { self.delay_us = us; self }
+
+    /// Consume the builder and produce a validated [`Config`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FiudpError::InvalidParityRatio`] if `parity_ratio` > 100.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a required field (`target`, `wake_at`, `key_file`) was not set.
+    pub fn build(self) -> Result<Config> {
+        let parity_ratio = ParityRatio::try_from(self.parity_ratio)?;
+        let input = match self.image {
+            Some(path) => InputSource::File(path),
+            None => InputSource::Stdin,
+        };
+        Ok(Config {
+            target_ip: self.target_ip.expect("ConfigBuilder: target is required"),
+            rendezvous_secs: self.rendezvous_secs.expect("ConfigBuilder: wake_at is required"),
+            key_path: self.key_path.expect("ConfigBuilder: key_file is required"),
+            input,
+            parity_ratio,
+            target_port: self.port,
+            delay: Duration::from_micros(self.delay_us),
         })
     }
 }
@@ -341,11 +523,11 @@ impl ParityRatio {
 }
 
 impl TryFrom<u8> for ParityRatio {
-    type Error = anyhow::Error;
+    type Error = FiudpError;
 
     fn try_from(value: u8) -> Result<Self> {
         if value > 100 {
-            bail!("parity ratio must be between 0 and 100");
+            return Err(FiudpError::InvalidParityRatio(value));
         }
 
         Ok(Self(value))
@@ -365,14 +547,19 @@ trait InputReader {
 impl InputReader for InputSource {
     fn read_all(&self) -> Result<Vec<u8>> {
         match self {
-            InputSource::File(path) => fs::read(path)
-                .with_context(|| format!("failed to read input file {}", path.display())),
+            InputSource::File(path) => fs::read(path).map_err(|e| FiudpError::Io {
+                context: format!("failed to read input file {}", path.display()),
+                source: e,
+            }),
             InputSource::Stdin => {
                 let mut buf = Vec::new();
                 io::stdin()
                     .lock()
                     .read_to_end(&mut buf)
-                    .context("failed to read from stdin")?;
+                    .map_err(|e| FiudpError::Io {
+                        context: "failed to read from stdin".into(),
+                        source: e,
+                    })?;
                 Ok(buf)
             }
         }
@@ -414,10 +601,7 @@ impl SessionIdStore {
         let current = match fs::read(&self.path) {
             Ok(bytes) => {
                 if bytes.len() != 2 {
-                    bail!(
-                        "session_id file {} must contain exactly 2 bytes",
-                        self.path.display()
-                    );
+                    return Err(FiudpError::InvalidSessionFile);
                 }
                 let mut buf = [0u8; 2];
                 buf.copy_from_slice(&bytes);
@@ -425,21 +609,22 @@ impl SessionIdStore {
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => {
-                return Err(err).with_context(|| {
-                    format!("failed to read session_id file {}", self.path.display())
+                return Err(FiudpError::Io {
+                    context: format!("failed to read session_id file {}", self.path.display()),
+                    source: err,
                 })
             }
         };
 
         let next = match current {
-            Some(value) => value.checked_add(1).ok_or_else(|| {
-                anyhow!("session_id overflow; rotate PSK and reset receiver state")
-            })?,
+            Some(value) => value.checked_add(1).ok_or(FiudpError::SessionIdOverflow)?,
             None => 1,
         };
 
-        fs::write(&self.path, next.to_be_bytes())
-            .with_context(|| format!("failed to write session_id file {}", self.path.display()))?;
+        fs::write(&self.path, next.to_be_bytes()).map_err(|e| FiudpError::Io {
+            context: format!("failed to write session_id file {}", self.path.display()),
+            source: e,
+        })?;
 
         Ok(next)
     }
@@ -464,9 +649,9 @@ impl FecEngine for ReedSolomonEngine {
         shards: &mut [&mut [u8]],
     ) -> Result<()> {
         let rse = ReedSolomon::new(data_shards, parity_shards)
-            .context("failed to initialize Reed-Solomon encoder")?;
+            .map_err(|e| FiudpError::Fec(format!("failed to initialize Reed-Solomon encoder: {e}")))?;
         rse.encode(shards)
-            .context("failed to generate parity shards")?;
+            .map_err(|e| FiudpError::Fec(format!("failed to generate parity shards: {e}")))?;
         Ok(())
     }
 }
@@ -502,7 +687,7 @@ impl Encryptor for ChaChaEncryptor {
         let tag = self
             .cipher
             .encrypt_in_place_detached(Nonce::from_slice(nonce), aad, buffer)
-            .map_err(|err| anyhow!("encryption failed: {err:?}"))?;
+            .map_err(|err| FiudpError::Encryption(format!("{err:?}")))?;
 
         let mut tag_bytes = [0u8; TAG_SIZE];
         tag_bytes.copy_from_slice(tag.as_slice());
@@ -550,11 +735,10 @@ impl PacketBuilder {
         payload: &[u8],
     ) -> Result<()> {
         if payload.len() != SHARD_SIZE {
-            bail!(
-                "invalid shard size {}, expected {}",
-                payload.len(),
-                SHARD_SIZE
-            );
+            return Err(FiudpError::InvalidShardSize {
+                actual: payload.len(),
+                expected: SHARD_SIZE,
+            });
         }
 
         out[..AAD_SIZE].copy_from_slice(aad);
@@ -576,11 +760,15 @@ struct UdpPacketSender {
 
 impl UdpPacketSender {
     fn new(target_ip: Ipv4Addr, port: u16) -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:0").context("failed to bind UDP socket")?;
+        let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| FiudpError::Io {
+            context: "failed to bind UDP socket".into(),
+            source: e,
+        })?;
         let target = SocketAddrV4::new(target_ip, port);
-        socket
-            .connect(target)
-            .with_context(|| format!("failed to connect UDP socket to {}", target))?;
+        socket.connect(target).map_err(|e| FiudpError::Io {
+            context: format!("failed to connect UDP socket to {}", target),
+            source: e,
+        })?;
 
         Ok(Self { socket, target })
     }
@@ -591,9 +779,15 @@ impl PacketSender for UdpPacketSender {
         let sent = self
             .socket
             .send(packet)
-            .with_context(|| format!("failed to send UDP packet to {}", self.target))?;
+            .map_err(|e| FiudpError::Io {
+                context: format!("failed to send UDP packet to {}", self.target),
+                source: e,
+            })?;
         if sent != packet.len() {
-            bail!("short UDP send: {} of {} bytes", sent, packet.len());
+            return Err(FiudpError::ShortSend {
+                sent,
+                expected: packet.len(),
+            });
         }
 
         Ok(())
@@ -628,27 +822,26 @@ where
     fn send(&self, parity_ratio: ParityRatio, rendezvous_secs: u32, session_id: u16) -> Result<()> {
         let mut payload = self.reader.read_all()?;
         if payload.is_empty() {
-            bail!("input is empty");
+            return Err(FiudpError::EmptyInput);
         }
 
         pad_to_shard_size(&mut payload);
 
         let data_shards = payload.len() / SHARD_SIZE;
         if data_shards == 0 {
-            bail!("input is empty after padding");
+            return Err(FiudpError::EmptyInput);
         }
 
         let parity_shards = parity_ratio.parity_shards(data_shards);
         let total_shards = data_shards + parity_shards;
 
         if total_shards > u16::MAX as usize {
-            bail!("total shards {} exceeds u16 limit", total_shards);
+            return Err(FiudpError::TooManyShards(total_shards));
         }
 
-        let data_shards_u16 =
-            u16::try_from(data_shards).context("data_shards exceeds u16 limit")?;
-        let parity_shards_u16 =
-            u16::try_from(parity_shards).context("parity_shards exceeds u16 limit")?;
+        // Safe: guarded by the check above.
+        let data_shards_u16 = data_shards as u16;
+        let parity_shards_u16 = parity_shards as u16;
 
         let mut parity_buffers = Vec::with_capacity(parity_shards);
         for _ in 0..parity_shards {
@@ -712,10 +905,12 @@ fn derive_nonce(session_id: u16, shard_index: u16) -> [u8; NONCE_SIZE] {
 }
 
 fn read_key(path: &Path) -> Result<[u8; 32]> {
-    let bytes =
-        fs::read(path).with_context(|| format!("failed to read key file {}", path.display()))?;
+    let bytes = fs::read(path).map_err(|e| FiudpError::Io {
+        context: format!("failed to read key file {}", path.display()),
+        source: e,
+    })?;
     if bytes.len() != 32 {
-        bail!("key file must contain exactly 32 bytes");
+        return Err(FiudpError::InvalidKeyLength(bytes.len()));
     }
 
     let mut key = [0u8; 32];
