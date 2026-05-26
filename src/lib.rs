@@ -253,8 +253,6 @@ pub const PAYLOAD_OFFSET: usize = TAG_OFFSET + TAG_SIZE;
 const DEFAULT_UDP_PORT: u16 = 5050;
 const DEFAULT_INTER_PACKET_DELAY_US: u64 = 500;
 
-
-
 /// Command-line arguments for the FIUDP sender.
 ///
 /// This struct derives [`clap::Parser`] and maps directly to the CLI flags
@@ -421,19 +419,40 @@ impl Default for ConfigBuilder {
 
 impl ConfigBuilder {
     /// Set the destination IPv4 address (**required**).
-    pub fn target(mut self, ip: Ipv4Addr) -> Self { self.target_ip = Some(ip); self }
+    pub fn target(mut self, ip: Ipv4Addr) -> Self {
+        self.target_ip = Some(ip);
+        self
+    }
     /// Set the rendezvous timer in seconds (**required**).
-    pub fn wake_at(mut self, secs: u32) -> Self { self.rendezvous_secs = Some(secs); self }
+    pub fn wake_at(mut self, secs: u32) -> Self {
+        self.rendezvous_secs = Some(secs);
+        self
+    }
     /// Set the path to the 32-byte PSK file (**required**).
-    pub fn key_file(mut self, path: impl Into<PathBuf>) -> Self { self.key_path = Some(path.into()); self }
+    pub fn key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.key_path = Some(path.into());
+        self
+    }
     /// Set the input image file path. If omitted, reads from stdin.
-    pub fn image(mut self, path: impl Into<PathBuf>) -> Self { self.image = Some(path.into()); self }
+    pub fn image(mut self, path: impl Into<PathBuf>) -> Self {
+        self.image = Some(path.into());
+        self
+    }
     /// Set the parity ratio percentage (0–100, default 15).
-    pub fn parity_ratio(mut self, percent: u8) -> Self { self.parity_ratio = percent; self }
+    pub fn parity_ratio(mut self, percent: u8) -> Self {
+        self.parity_ratio = percent;
+        self
+    }
     /// Set the UDP port (default 5050).
-    pub fn port(mut self, port: u16) -> Self { self.port = port; self }
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
     /// Set the inter-packet delay in microseconds (default 500).
-    pub fn delay_us(mut self, us: u64) -> Self { self.delay_us = us; self }
+    pub fn delay_us(mut self, us: u64) -> Self {
+        self.delay_us = us;
+        self
+    }
 
     /// Consume the builder and produce a validated [`Config`].
     ///
@@ -452,7 +471,9 @@ impl ConfigBuilder {
         };
         Ok(Config {
             target_ip: self.target_ip.expect("ConfigBuilder: target is required"),
-            rendezvous_secs: self.rendezvous_secs.expect("ConfigBuilder: wake_at is required"),
+            rendezvous_secs: self
+                .rendezvous_secs
+                .expect("ConfigBuilder: wake_at is required"),
             key_path: self.key_path.expect("ConfigBuilder: key_file is required"),
             input,
             parity_ratio,
@@ -648,8 +669,9 @@ impl FecEngine for ReedSolomonEngine {
         parity_shards: usize,
         shards: &mut [&mut [u8]],
     ) -> Result<()> {
-        let rse = ReedSolomon::new(data_shards, parity_shards)
-            .map_err(|e| FiudpError::Fec(format!("failed to initialize Reed-Solomon encoder: {e}")))?;
+        let rse = ReedSolomon::new(data_shards, parity_shards).map_err(|e| {
+            FiudpError::Fec(format!("failed to initialize Reed-Solomon encoder: {e}"))
+        })?;
         rse.encode(shards)
             .map_err(|e| FiudpError::Fec(format!("failed to generate parity shards: {e}")))?;
         Ok(())
@@ -776,13 +798,10 @@ impl UdpPacketSender {
 
 impl PacketSender for UdpPacketSender {
     fn send(&self, packet: &[u8]) -> Result<()> {
-        let sent = self
-            .socket
-            .send(packet)
-            .map_err(|e| FiudpError::Io {
-                context: format!("failed to send UDP packet to {}", self.target),
-                source: e,
-            })?;
+        let sent = self.socket.send(packet).map_err(|e| FiudpError::Io {
+            context: format!("failed to send UDP packet to {}", self.target),
+            source: e,
+        })?;
         if sent != packet.len() {
             return Err(FiudpError::ShortSend {
                 sent,

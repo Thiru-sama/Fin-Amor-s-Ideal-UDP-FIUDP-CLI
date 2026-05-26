@@ -10,7 +10,7 @@
 
 use std::net::Ipv4Addr;
 
-use fiudp_cli::{Config, FiudpError, run};
+use fiudp_cli::{run, Config, FiudpError};
 
 fn main() {
     let config = Config::builder()
