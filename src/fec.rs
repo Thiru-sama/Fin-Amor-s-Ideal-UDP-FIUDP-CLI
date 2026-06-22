@@ -23,7 +23,7 @@ use crate::error::{FiudpError, Result};
 /// The production implementation ([`ReedSolomonEngine`]) delegates to
 /// the `reed-solomon-erasure` crate. Tests can substitute a no-op or
 /// deterministic implementation.
-pub(crate) trait FecEngine {
+pub trait FecEngine {
     /// Encode parity shards in-place.
     ///
     /// `shards` contains `data_shards` data slices followed by
@@ -50,7 +50,7 @@ pub(crate) trait FecEngine {
 ///
 /// This is a zero-size type — the Reed-Solomon encoder is constructed
 /// fresh for each session since the shard counts can vary.
-pub(crate) struct ReedSolomonEngine;
+pub struct ReedSolomonEngine;
 
 impl FecEngine for ReedSolomonEngine {
     fn encode(

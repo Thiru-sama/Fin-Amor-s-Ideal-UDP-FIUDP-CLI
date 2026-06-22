@@ -35,7 +35,7 @@ use crate::types::{DataShardCount, ParityShardCount, RendezvousSecs, SessionId, 
 /// The production implementation ([`UdpPacketSender`]) sends over a real
 /// UDP socket. Tests can substitute a `Vec<Vec<u8>>` collector or a
 /// no-op sender.
-pub(crate) trait PacketSender {
+pub trait PacketSender {
     /// Send a single FIUDP packet.
     ///
     /// `packet` is always exactly [`PACKET_SIZE`] bytes.
@@ -57,7 +57,7 @@ pub(crate) trait PacketSender {
 /// The socket is bound to `0.0.0.0:0` (OS-assigned ephemeral port)
 /// and connected to the target address, so subsequent `send()` calls
 /// do not need to specify the destination.
-pub(crate) struct UdpPacketSender {
+pub struct UdpPacketSender {
     /// The bound and connected UDP socket.
     socket: UdpSocket,
     /// The target address (for error messages).
@@ -72,7 +72,7 @@ impl UdpPacketSender {
     /// # Errors
     ///
     /// Returns [`FiudpError::Io`] if the socket cannot be bound or connected.
-    pub(crate) fn new(target_ip: Ipv4Addr, port: u16) -> Result<Self> {
+    pub fn new(target_ip: Ipv4Addr, port: u16) -> Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| FiudpError::Io {
             context: "failed to bind UDP socket".into(),
             source: e,
@@ -126,7 +126,7 @@ impl PacketSender for UdpPacketSender {
 /// A `FiudpSender` is consumed by a single call to [`send`](Self::send).
 /// For multiple transmissions, create a new instance each time (the
 /// session ID is managed externally by [`crate::session::SessionIdStore`]).
-pub(crate) struct FiudpSender<R, F, E, S> {
+pub struct FiudpSender<R, F, E, S> {
     /// The input reader providing frame bytes.
     reader: R,
     /// The FEC encoder for parity generation.
@@ -137,6 +137,12 @@ pub(crate) struct FiudpSender<R, F, E, S> {
     sender: S,
     /// Delay injected between consecutive packet sends.
     delay: Duration,
+    /// Percentage of packets to drop.
+    chaos_drop: u8,
+    /// Number of consecutive packets to drop.
+    chaos_burst: u32,
+    /// Whether to shuffle packets before sending.
+    chaos_shuffle: bool,
 }
 
 impl<R, F, E, S> FiudpSender<R, F, E, S>
@@ -147,13 +153,25 @@ where
     S: PacketSender,
 {
     /// Create a new sender with the given dependencies.
-    pub(crate) fn new(reader: R, fec: F, encryptor: E, sender: S, delay: Duration) -> Self {
+    pub fn new(
+        reader: R,
+        fec: F,
+        encryptor: E,
+        sender: S,
+        delay: Duration,
+        chaos_drop: u8,
+        chaos_burst: u32,
+        chaos_shuffle: bool,
+    ) -> Self {
         Self {
             reader,
             fec,
             encryptor,
             sender,
             delay,
+            chaos_drop,
+            chaos_burst,
+            chaos_shuffle,
         }
     }
 
@@ -174,7 +192,7 @@ where
     /// # Errors
     ///
     /// Propagates errors from any stage of the pipeline.
-    pub(crate) fn send(
+    pub fn send(
         &self,
         parity_ratio: ParityRatio,
         rendezvous_secs: RendezvousSecs,
@@ -223,9 +241,8 @@ where
             data_shards_u16,
             parity_shards_u16,
         );
-        let mut packet = [0u8; PACKET_SIZE];
+        let mut ready_packets = Vec::with_capacity(shards.len());
 
-        let shard_count = shards.len();
         for (index, shard_ref) in shards.iter_mut().enumerate() {
             let shard = &mut **shard_ref;
             debug_assert_eq!(shard.len(), SHARD_SIZE);
@@ -236,10 +253,39 @@ where
             let aad = packet_builder.build_aad(shard_index);
             let tag = self.encryptor.encrypt_in_place(&nonce, &aad, shard)?;
 
+            let mut packet = [0u8; PACKET_SIZE];
             packet_builder.write_packet(&mut packet, &aad, &tag, shard)?;
+            ready_packets.push(packet);
+        }
+
+        if self.chaos_burst > 0 {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let max_start = ready_packets.len().saturating_sub(self.chaos_burst as usize);
+            if !ready_packets.is_empty() {
+                let start_idx = rng.gen_range(0..=max_start);
+                let end_idx = std::cmp::min(ready_packets.len(), start_idx + self.chaos_burst as usize);
+                ready_packets.drain(start_idx..end_idx);
+            }
+        }
+
+        if self.chaos_drop > 0 {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            ready_packets.retain(|_| rng.gen_range(0..100) >= self.chaos_drop);
+        }
+
+        if self.chaos_shuffle {
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            ready_packets.shuffle(&mut rng);
+        }
+
+        let packet_count = ready_packets.len();
+        for (i, packet) in ready_packets.into_iter().enumerate() {
             self.sender.send(&packet)?;
 
-            if index + 1 < shard_count {
+            if i + 1 < packet_count {
                 thread::sleep(self.delay);
             }
         }

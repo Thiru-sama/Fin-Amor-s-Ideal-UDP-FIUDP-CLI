@@ -41,7 +41,7 @@ use crate::types::{SessionId, ShardIndex};
 /// The trait exists primarily for testability: in unit tests, a mock
 /// encryptor can be substituted to verify the pipeline without pulling
 /// in the real ChaCha20-Poly1305 implementation.
-pub(crate) trait Encryptor {
+pub trait Encryptor {
     /// Encrypt `buffer` in-place and return the authentication tag.
     ///
     /// # Parameters
@@ -69,14 +69,14 @@ pub(crate) trait Encryptor {
 ///
 /// Wraps a [`ChaCha20Poly1305`] cipher instance initialised with
 /// the 256-bit PSK.
-pub(crate) struct ChaChaEncryptor {
+pub struct ChaChaEncryptor {
     /// The initialised AEAD cipher.
     cipher: ChaCha20Poly1305,
 }
 
 impl ChaChaEncryptor {
     /// Create a new encryptor from a 32-byte pre-shared key.
-    pub(crate) fn new(key: [u8; 32]) -> Self {
+    pub fn new(key: [u8; 32]) -> Self {
         Self {
             cipher: ChaCha20Poly1305::new(Key::from_slice(&key)),
         }
@@ -117,7 +117,7 @@ impl Encryptor for ChaChaEncryptor {
 /// Nonce uniqueness relies on `session_id` being strictly monotonic
 /// under a given PSK. If `session_id` wraps around (`u16::MAX`), the
 /// PSK **must** be rotated before any further transmissions.
-pub(crate) fn derive_nonce(session_id: SessionId, shard_index: ShardIndex) -> [u8; NONCE_SIZE] {
+pub fn derive_nonce(session_id: SessionId, shard_index: ShardIndex) -> [u8; NONCE_SIZE] {
     let mut nonce = [0u8; NONCE_SIZE];
     nonce[..2].copy_from_slice(&session_id.to_be_bytes());
     nonce[2..4].copy_from_slice(&shard_index.to_be_bytes());
@@ -132,7 +132,7 @@ pub(crate) fn derive_nonce(session_id: SessionId, shard_index: ShardIndex) -> [u
 ///
 /// The production implementation ([`FileKeySource`]) reads from disk;
 /// tests can provide an in-memory key.
-pub(crate) trait KeySource {
+pub trait KeySource {
     /// Load and return the 256-bit pre-shared key.
     ///
     /// # Errors
@@ -150,14 +150,14 @@ pub(crate) trait KeySource {
 /// ```sh
 /// dd if=/dev/urandom of=psk.bin bs=32 count=1
 /// ```
-pub(crate) struct FileKeySource {
+pub struct FileKeySource {
     /// Path to the raw 32-byte key file.
     path: PathBuf,
 }
 
 impl FileKeySource {
     /// Create a new key source pointing to the given path.
-    pub(crate) fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }
@@ -174,7 +174,7 @@ impl KeySource for FileKeySource {
 ///
 /// - [`FiudpError::Io`] if the file cannot be read.
 /// - [`FiudpError::InvalidKeyLength`] if the file is not exactly 32 bytes.
-pub(crate) fn read_key(path: &Path) -> Result<[u8; 32]> {
+pub fn read_key(path: &Path) -> Result<[u8; 32]> {
     let bytes = fs::read(path).map_err(|e| FiudpError::Io {
         context: format!("failed to read key file {}", path.display()),
         source: e,

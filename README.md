@@ -13,6 +13,7 @@ _The Swing ("The Happy Accidents of the Swing"). Painting by Jean-Honoré Fragon
 ## Table of contents
 - [What it does](#what-it-does)
 - [Why FIUDP for TRMNL](#why-fiudp-for-trmnl)
+- [Benchmarks & Performance](#benchmarks--performance)
 - [Install](#install)
 - [Usage](#usage)
 - [Configuration](#configuration)
@@ -39,6 +40,12 @@ _The Swing ("The Happy Accidents of the Swing"). Painting by Jean-Honoré Fragon
 - Secure by default with per-shard AEAD and FEC for loss recovery.
 
 Keywords: TRMNL, e-ink, FIUDP, UDP, stateless, raw BMP, embedded display.
+
+## Benchmarks & Performance
+FIUDP's true advantage for IoT is **Zero-RTT** and **Statelessness**. By eliminating TCP and TLS handshakes, FIUDP drastically reduces the active time of the Wi-Fi radio on the micro-controller, saving significant battery life. 
+
+> [!NOTE]
+> Detailed metrics, network footprint comparisons, and plotting scripts are available in the [Benchmarks Documentation](docs/benchmarks/README.md).
 
 ## Install
 

@@ -140,6 +140,14 @@ pub use protocol::{
 };
 pub use types::{DataShardCount, ParityShardCount, RendezvousSecs, SessionId, ShardIndex};
 
+#[doc(hidden)]
+pub mod internals {
+    pub use crate::crypto::{ChaChaEncryptor, Encryptor, derive_nonce};
+    pub use crate::fec::{FecEngine, ReedSolomonEngine};
+    pub use crate::sender::{FiudpSender, PacketSender};
+    pub use crate::config::{InputReader, ParityRatio};
+}
+
 // -----------------------------------------------------------------------
 // Crate-internal imports for run()
 // -----------------------------------------------------------------------
@@ -194,7 +202,7 @@ pub fn run(config: Config) -> Result<()> {
     let fec = ReedSolomonEngine;
     let sender = UdpPacketSender::new(config.target_ip, config.target_port)?;
 
-    let pipeline = FiudpSender::new(reader, fec, encryptor, sender, config.delay);
+    let pipeline = FiudpSender::new(reader, fec, encryptor, sender, config.delay, config.chaos_drop, config.chaos_burst, config.chaos_shuffle);
 
     pipeline.send(
         config.parity_ratio,

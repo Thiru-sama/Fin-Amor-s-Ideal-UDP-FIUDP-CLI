@@ -90,6 +90,18 @@ pub struct Args {
     /// Delay between packets in microseconds.
     #[arg(long = "delay-us", default_value_t = DEFAULT_INTER_PACKET_DELAY_US)]
     delay_us: u64,
+
+    /// Chaos Generator: Drop a consecutive block of N packets (burst loss).
+    #[arg(long = "chaos-burst", default_value_t = 0, value_name = "N")]
+    chaos_burst: u32,
+
+    /// Chaos Generator: Drop the specified percentage of packets (0-100).
+    #[arg(long = "chaos-drop", default_value_t = 0, value_name = "PERCENT")]
+    chaos_drop: u8,
+
+    /// Chaos Generator: Randomly shuffle the order of packets before sending.
+    #[arg(long = "chaos-shuffle", default_value_t = false)]
+    chaos_shuffle: bool,
 }
 
 // -----------------------------------------------------------------------
@@ -109,19 +121,25 @@ pub struct Args {
 #[derive(Debug)]
 pub struct Config {
     /// Destination IPv4 address of the TRMNL display.
-    pub(crate) target_ip: Ipv4Addr,
+    pub target_ip: Ipv4Addr,
     /// Seconds until the terminal's next wake window.
-    pub(crate) rendezvous_secs: u32,
+    pub rendezvous_secs: u32,
     /// Path to the 32-byte pre-shared key file.
-    pub(crate) key_path: PathBuf,
+    pub key_path: PathBuf,
     /// Where to read the input frame from (file or stdin).
-    pub(crate) input: InputSource,
+    pub input: InputSource,
     /// Percentage of parity shards relative to data shards.
-    pub(crate) parity_ratio: ParityRatio,
+    pub parity_ratio: ParityRatio,
     /// UDP port on the target device.
-    pub(crate) target_port: u16,
+    pub target_port: u16,
     /// Delay injected between consecutive UDP sends.
-    pub(crate) delay: Duration,
+    pub delay: Duration,
+    /// Chaos Generator: percentage of packets to drop.
+    pub chaos_drop: u8,
+    /// Chaos Generator: number of consecutive packets to drop (burst).
+    pub chaos_burst: u32,
+    /// Chaos Generator: whether to shuffle packets.
+    pub chaos_shuffle: bool,
 }
 
 impl Config {
@@ -164,6 +182,9 @@ impl TryFrom<Args> for Config {
             parity_ratio,
             target_port: args.port,
             delay: Duration::from_micros(args.delay_us),
+            chaos_drop: args.chaos_drop.min(100),
+            chaos_burst: args.chaos_burst,
+            chaos_shuffle: args.chaos_shuffle,
         })
     }
 }
@@ -199,6 +220,12 @@ pub struct ConfigBuilder {
     port: u16,
     /// Inter-packet delay in microseconds (default 500).
     delay_us: u64,
+    /// Chaos drop percentage.
+    chaos_drop: u8,
+    /// Chaos burst size.
+    chaos_burst: u32,
+    /// Chaos shuffle flag.
+    chaos_shuffle: bool,
 }
 
 impl Default for ConfigBuilder {
@@ -211,6 +238,9 @@ impl Default for ConfigBuilder {
             parity_ratio: 15,
             port: DEFAULT_UDP_PORT,
             delay_us: DEFAULT_INTER_PACKET_DELAY_US,
+            chaos_drop: 0,
+            chaos_burst: 0,
+            chaos_shuffle: false,
         }
     }
 }
@@ -258,6 +288,24 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set the chaos drop percentage (0-100).
+    pub fn chaos_drop(mut self, percent: u8) -> Self {
+        self.chaos_drop = percent.min(100);
+        self
+    }
+
+    /// Set the chaos burst size (number of consecutive packets to drop).
+    pub fn chaos_burst(mut self, burst: u32) -> Self {
+        self.chaos_burst = burst;
+        self
+    }
+
+    /// Set whether to shuffle packets.
+    pub fn chaos_shuffle(mut self, shuffle: bool) -> Self {
+        self.chaos_shuffle = shuffle;
+        self
+    }
+
     /// Consume the builder and produce a validated [`Config`].
     ///
     /// # Errors
@@ -283,6 +331,9 @@ impl ConfigBuilder {
             parity_ratio,
             target_port: self.port,
             delay: Duration::from_micros(self.delay_us),
+            chaos_drop: self.chaos_drop,
+            chaos_burst: self.chaos_burst,
+            chaos_shuffle: self.chaos_shuffle,
         })
     }
 }
@@ -300,14 +351,14 @@ impl ConfigBuilder {
 /// The number of parity shards for a given data shard count is computed
 /// as `ceil(data_shards × ratio / 100)`.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ParityRatio(u8);
+pub struct ParityRatio(u8);
 
 impl ParityRatio {
     /// Compute the number of parity shards for the given data shard count.
     ///
     /// Uses ceiling division so that even a single data shard with a
     /// non-zero ratio produces at least one parity shard.
-    pub(crate) fn parity_shards(self, data_shards: usize) -> usize {
+    pub fn parity_shards(self, data_shards: usize) -> usize {
         if self.0 == 0 {
             return 0;
         }
@@ -338,7 +389,7 @@ impl TryFrom<u8> for ParityRatio {
 /// The FIUDP sender can read from a regular file or from standard input,
 /// following the UNIX composability principle (see SPEC.md §1).
 #[derive(Debug)]
-pub(crate) enum InputSource {
+pub enum InputSource {
     /// Read the frame from a file at the given path.
     File(PathBuf),
     /// Read the frame from standard input (for pipe-based workflows).
@@ -349,7 +400,7 @@ pub(crate) enum InputSource {
 ///
 /// Both [`InputSource::File`] and [`InputSource::Stdin`] implement this
 /// trait. Tests can substitute a `Vec<u8>` wrapper.
-pub(crate) trait InputReader {
+pub trait InputReader {
     /// Read the entire input frame into a byte vector.
     ///
     /// # Errors
