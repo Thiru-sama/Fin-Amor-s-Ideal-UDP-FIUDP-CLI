@@ -46,14 +46,17 @@ FIUDP's true advantage for IoT is **Zero-RTT** and **Statelessness**. By elimina
 
 ### Establishment Latency (Zero-RTT)
 The Wi-Fi radio only wakes up to transmit (or receive) the payload burst, drastically reducing active time compared to TCP/TLS handshakes.
+
 ![RTT Latency](docs/benchmarks/academic_rtt_latency.png)
 
 ### Network Footprint (Overhead)
 FIUDP with 10% FEC uses slightly more total bandwidth than HTTPS for a 48KB payload, but trades this for zero connection overhead.
+
 ![Network Footprint](docs/benchmarks/academic_footprint_stacked.png)
 
 ### Server Processing Time
 The processing time added by ChaCha20 encryption and Reed-Solomon Forward Error Correction (FEC) is negligible on the server side (less than 400 µs for a 48KB frame).
+
 ![Processing Time](docs/benchmarks/academic_processing_time.png)
 
 > [!NOTE]
