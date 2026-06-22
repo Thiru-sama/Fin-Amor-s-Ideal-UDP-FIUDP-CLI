@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use fiudp_cli::internals::{FecEngine, ReedSolomonEngine};
 use fiudp_cli::SHARD_SIZE;
 use rand::RngCore;
@@ -9,7 +9,7 @@ fn bench_fec_encode(c: &mut Criterion) {
 
     // A typical 800x480 1bpp image is 48000 bytes.
     // SHARD_SIZE is 1400 bytes, so ~35 data shards.
-    let data_shards_counts = [10, 35, 100]; 
+    let data_shards_counts = [10, 35, 100];
     let parity_ratios = [0.1, 0.25, 0.5]; // 10%, 25%, 50% parity
 
     for &ds in &data_shards_counts {
@@ -23,21 +23,23 @@ fn bench_fec_encode(c: &mut Criterion) {
             }
 
             group.throughput(criterion::Throughput::Bytes((ds * SHARD_SIZE) as u64));
-            
-            group.bench_with_input(BenchmarkId::new(format!("RS_{}ds_{}ps", ds, ps), ratio), &ratio, |b, _| {
-                b.iter(|| {
-                    // We need to re-borrow the mutable slices each time
-                    let mut shard_refs: Vec<&mut [u8]> = shards_data.iter_mut().map(|v| v.as_mut_slice()).collect();
-                    fec.encode(
-                        black_box(ds),
-                        black_box(ps),
-                        black_box(&mut shard_refs)
-                    ).unwrap();
-                })
-            });
+
+            group.bench_with_input(
+                BenchmarkId::new(format!("RS_{}ds_{}ps", ds, ps), ratio),
+                &ratio,
+                |b, _| {
+                    b.iter(|| {
+                        // We need to re-borrow the mutable slices each time
+                        let mut shard_refs: Vec<&mut [u8]> =
+                            shards_data.iter_mut().map(|v| v.as_mut_slice()).collect();
+                        fec.encode(black_box(ds), black_box(ps), black_box(&mut shard_refs))
+                            .unwrap();
+                    })
+                },
+            );
         }
     }
-    
+
     group.finish();
 }
 

@@ -153,6 +153,7 @@ where
     S: PacketSender,
 {
     /// Create a new sender with the given dependencies.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         reader: R,
         fec: F,
@@ -261,10 +262,13 @@ where
         if self.chaos_burst > 0 {
             use rand::Rng;
             let mut rng = rand::thread_rng();
-            let max_start = ready_packets.len().saturating_sub(self.chaos_burst as usize);
+            let max_start = ready_packets
+                .len()
+                .saturating_sub(self.chaos_burst as usize);
             if !ready_packets.is_empty() {
                 let start_idx = rng.gen_range(0..=max_start);
-                let end_idx = std::cmp::min(ready_packets.len(), start_idx + self.chaos_burst as usize);
+                let end_idx =
+                    std::cmp::min(ready_packets.len(), start_idx + self.chaos_burst as usize);
                 ready_packets.drain(start_idx..end_idx);
             }
         }

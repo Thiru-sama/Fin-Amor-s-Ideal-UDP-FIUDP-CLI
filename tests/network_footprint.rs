@@ -1,6 +1,8 @@
-use fiudp_cli::internals::{ChaChaEncryptor, FiudpSender, InputReader, PacketSender, ReedSolomonEngine, ParityRatio};
-use fiudp_cli::types::{RendezvousSecs, SessionId};
 use fiudp_cli::error::Result;
+use fiudp_cli::internals::{
+    ChaChaEncryptor, FiudpSender, InputReader, PacketSender, ParityRatio, ReedSolomonEngine,
+};
+use fiudp_cli::types::{RendezvousSecs, SessionId};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,10 +27,10 @@ impl PacketSender for AccountingSender {
     fn send(&self, packet: &[u8]) -> Result<()> {
         let mut pc = self.packet_count.lock().unwrap();
         *pc += 1;
-        
+
         let mut bc = self.byte_count.lock().unwrap();
         *bc += packet.len();
-        
+
         Ok(())
     }
 }
@@ -55,22 +57,33 @@ fn test_network_footprint() {
                 byte_count: Arc::clone(&byte_count),
             };
 
-            let pipeline = FiudpSender::new(reader, fec, encryptor, sender, Duration::from_secs(0), 0, 0, false);
-            
-            pipeline.send(
-                ParityRatio::try_from(pct).unwrap(),
-                RendezvousSecs::new(3600),
-                SessionId::new(1)
-            ).unwrap();
+            let pipeline = FiudpSender::new(
+                reader,
+                fec,
+                encryptor,
+                sender,
+                Duration::from_secs(0),
+                0,
+                0,
+                false,
+            );
+
+            pipeline
+                .send(
+                    ParityRatio::try_from(pct).unwrap(),
+                    RendezvousSecs::new(3600),
+                    SessionId::new(1),
+                )
+                .unwrap();
 
             let final_packets = *packet_count.lock().unwrap();
             let final_bytes = *byte_count.lock().unwrap();
-            
+
             // To compare to standard protocols, remember that UDP has 8 bytes header, IPv4 has 20 bytes header.
             // But this measures the application layer UDP payload (which is exactly 1428 bytes per packet in FIUDP).
             // Total IP footprint = final_bytes + (final_packets * 28)
             let ip_footprint = final_bytes + (final_packets * 28);
-            
+
             let overhead_pct = ((ip_footprint as f64 / size as f64) - 1.0) * 100.0;
 
             println!(
@@ -78,7 +91,9 @@ fn test_network_footprint() {
                 size, pct, final_packets, ip_footprint, overhead_pct
             );
         }
-        println!("---------------------------------------------------------------------------------");
+        println!(
+            "---------------------------------------------------------------------------------"
+        );
     }
     println!();
 }
