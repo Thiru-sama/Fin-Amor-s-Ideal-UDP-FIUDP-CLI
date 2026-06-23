@@ -165,4 +165,4 @@ GNU GPL v3. See LICENSE.
 - Rust community
 
 ## Academic Publication
-Read the full research paper on Zenodo: [Link to DOI]
+Read the full research paper on Zenodo: [[Link to DOI](https://doi.org/10.5281/zenodo.20813328)]
