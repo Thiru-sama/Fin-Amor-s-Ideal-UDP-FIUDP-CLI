@@ -3,9 +3,9 @@
 [![CI](https://github.com/Thiru-sama/Fin-Amor-s-Ideal-UDP-FIUDP-CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/Thiru-sama/Fin-Amor-s-Ideal-UDP-FIUDP-CLI/actions/workflows/ci.yml)
 [![docs.rs](https://docs.rs/fiudp-cli/badge.svg)](https://docs.rs/fiudp-cli)
 
-Small, sharp Rust tool that streams a raw image to a TRMNL display IP over FIUDP. It applies FEC and AEAD encryption (ChaCha20-Poly1305) with a 256-bit pre-shared key, and is designed to compose well with other Unix tools.
+This repository provides the "Stateless Sender" implementation of the academic **FIUDP (Forward Error Corrected IoT UDP)** protocol. It is a small, sharp Rust tool that streams a raw image to a TRMNL display IP (or other constrained e-ink displays) over FIUDP.
 
-Purpose-built for TRMNL and other e-ink terminals: stateless UDP transport for raw BMP frames, one burst per frame, secure and deterministic.
+Designed specifically for constrained e-ink displays, it features a stateless UDP transport for raw BMP frames. It sends one burst per frame in a secure and deterministic manner, applies FEC and AEAD encryption (ChaCha20-Poly1305) with a 256-bit pre-shared key, and is designed to compose well with other Unix tools.
 
 ![The Swing](assets/Fragonard_The_Swing.jpg)
 _The Swing ("The Happy Accidents of the Swing"). Painting by Jean-Honoré Fragonard._  
@@ -14,18 +14,20 @@ _The Swing ("The Happy Accidents of the Swing"). Painting by Jean-Honoré Fragon
 - [What it does](#what-it-does)
 - [Why FIUDP for TRMNL](#why-fiudp-for-trmnl)
 - [Benchmarks & Performance](#benchmarks--performance)
+- [Architecture (Offloaded Complexity)](#architecture-offloaded-complexity)
+- [Pacing (Traffic Shaping)](#pacing-traffic-shaping)
 - [Install](#install)
 - [Usage](#usage)
 - [Configuration](#configuration)
 - [Examples](#examples)
 - [Philosophy & Vision](#philosophy--vision)
-- [Design](#design)
 - [Security](#security)
 - [Build](#build)
 - [Test](#test)
 - [Contributing](#contributing)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
+- [Academic Publication](#academic-publication)
 
 ## What it does
 - Reads a raw image from a file or stdin
@@ -55,12 +57,28 @@ FIUDP with 10% FEC uses slightly more total bandwidth than HTTPS for a 48KB payl
 ![Network Footprint](docs/benchmarks/academic_footprint_stacked.png)
 
 ### Server Processing Time
-The processing time added by ChaCha20 encryption and Reed-Solomon Forward Error Correction (FEC) is negligible on the server side (less than 400 µs for a 48KB frame).
-
+The processing time added by ChaCha20 encryption and Reed-Solomon Forward Error Correction (FEC) is negligible on the server side. Our benchmarks show that the entire preparation pipeline is executed in < 338 µs, with encryption throughput reaching 633 MiB/s.
 ![Processing Time](docs/benchmarks/academic_processing_time.png)
 
 > [!NOTE]
 > Detailed metrics, network footprint comparisons, and plotting scripts are available in the [Benchmarks Documentation](docs/benchmarks/README.md).
+
+## Architecture (Offloaded Complexity)
+The core philosophy of FIUDP is to offload complexity from the constrained microcontroller to the sender. This CLI tool handles the heavy lifting:
+
+1. **Image Processing**: Performs dithering and prepares the raw BMP payload.
+2. **Forward Error Correction**: Encodes the payload using Reed-Solomon RS(39,35) to ensure resilience against packet loss.
+3. **Cryptography**: Secures the data with ChaCha20-Poly1305 authenticated encryption (AEAD) using a 256-bit pre-shared key.
+4. **Streaming**: UDP burst to the target TRMNL display.
+
+Unix principles observed:
+- Do one thing well
+- Compose with pipes
+- Text-based config
+- Predictable exit codes
+
+## Pacing (Traffic Shaping)
+A key feature of the FIUDP stateless sender is the configurable inter-packet delay (e.g., 25ms). This pacing acts as a crucial traffic shaping mechanism to avoid fragmenting or overflowing the LwIP heap on the target microcontroller, ensuring reliable packet processing even on severely constrained hardware.
 
 ## Install
 
@@ -119,20 +137,6 @@ FIUDP treats the network as a short, asynchronous burst, not a leash. It takes a
 
 Durability comes from refusing web bloat. FIUDP limits scope to raw pixels plus ChaCha20-Poly1305 and FEC. No HTTP/JSON on embedded, no MQTT, no cloud broker. The protocol is fixed, deterministic, and agnostic: if hardware can render pixels and receive UDP, this code still works years later, with the terminal effectively timeless.
 
-## Design
-
-Unix principles:
-- Do one thing well
-- Compose with pipes
-- Text-based config
-- Predictable exit codes
-
-FIUDP pipeline:
-1) Read image
-2) FEC encode
-3) AEAD encrypt (ChaCha20-Poly1305) with authenticated header (AAD)
-4) UDP stream to TRMNL
-
 ## Security
 - ChaCha20-Poly1305 uses a 256-bit pre-shared key; this provides post-quantum resilience against Grover's algorithm, but it is not an asymmetric PQ KEM or "PQS suite"
 - Packet headers are authenticated as AAD; tampering with session ID, shard index, or rendezvous timer should fail authentication on the receiver
@@ -159,3 +163,6 @@ GNU GPL v3. See LICENSE.
 ## Acknowledgements
 - TRMNL display ecosystem
 - Rust community
+
+## Academic Publication
+Read the full research paper on Zenodo: [Link to DOI]

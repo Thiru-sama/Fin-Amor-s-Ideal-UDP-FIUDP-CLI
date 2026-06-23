@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests migrated to their respective modules (`protocol::tests`, `config::tests`).
 
 ### Fixed
-- Nothing — this is a pure refactoring with no behavioural changes.
+- Nothing. This is a pure refactoring with no behavioural changes.
 
 ## [0.1.0]
 
