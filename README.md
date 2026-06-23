@@ -10,6 +10,8 @@ Designed specifically for constrained e-ink displays, it features a stateless UD
 ![The Swing](assets/Fragonard_The_Swing.jpg)
 _The Swing ("The Happy Accidents of the Swing"). Painting by Jean-Honoré Fragonard._  
 
+> **The Fin' Amor Protocol:** *The Swing* illustrates a core design choice of FIUDP. Just as the suitor in the painting casts his gaze upward with unwavering devotion and no expectation of a formal reply, FIUDP sends its packets into the void. We removed acknowledgments (ACKs) and handshakes not just for zero-RTT performance, but as a philosophy: the sender trusts the receiver absolutely.
+
 ## Table of contents
 - [What it does](#what-it-does)
 - [Why FIUDP for TRMNL](#why-fiudp-for-trmnl)
