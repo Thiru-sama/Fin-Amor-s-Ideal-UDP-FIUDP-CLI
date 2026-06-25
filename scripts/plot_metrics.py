@@ -34,18 +34,18 @@ def plot_stacked_footprint():
     c_headers = '#f39c12'
     c_fec = '#27ae60'
     
-    p1 = ax.bar(labels, payload, width, label='Payload Utile (48 Ko)', color=c_payload, edgecolor='black', linewidth=0.5)
-    p2 = ax.bar(labels, handshakes, width, bottom=payload, label='Overhead de Connexion (Handshakes)', color=c_handshake, edgecolor='black', linewidth=0.5)
-    p3 = ax.bar(labels, headers_overhead, width, bottom=payload+handshakes, label='Overhead d\'En-têtes (IP/TCP/UDP/Crypto)', color=c_headers, edgecolor='black', linewidth=0.5)
-    p4 = ax.bar(labels, parity_fec, width, bottom=payload+handshakes+headers_overhead, label='Redondance FEC (Reed-Solomon)', color=c_fec, edgecolor='black', linewidth=0.5)
+    p1 = ax.bar(labels, payload, width, label='Useful Payload (48 KB)', color=c_payload, edgecolor='black', linewidth=0.5)
+    p2 = ax.bar(labels, handshakes, width, bottom=payload, label='Connection Overhead (Handshakes)', color=c_handshake, edgecolor='black', linewidth=0.5)
+    p3 = ax.bar(labels, headers_overhead, width, bottom=payload+handshakes, label='Header Overhead (IP/TCP/UDP/Crypto)', color=c_headers, edgecolor='black', linewidth=0.5)
+    p4 = ax.bar(labels, parity_fec, width, bottom=payload+handshakes+headers_overhead, label='FEC Redundancy (Reed-Solomon)', color=c_fec, edgecolor='black', linewidth=0.5)
     
     # Add total byte annotations
     totals = payload + handshakes + headers_overhead + parity_fec
     for i, total in enumerate(totals):
         ax.text(i, total + 1000, f"{int(total):,} B", ha='center', va='bottom', fontweight='bold', fontsize=12)
 
-    ax.set_ylabel('Volume de Données Transmis (Octets)', fontweight='bold')
-    ax.set_title("Décomposition de l'Empreinte Réseau (Payload 48 Ko)", pad=20, fontweight='bold', fontsize=16)
+    ax.set_ylabel('Transmitted Data Volume (Bytes)', fontweight='bold')
+    ax.set_title("Network Footprint Breakdown (48 KB Payload)", pad=20, fontweight='bold', fontsize=16)
     
     # Move legend outside
     ax.legend(loc='upper left', bbox_to_anchor=(1, 1), frameon=False)
@@ -71,14 +71,14 @@ def plot_rtt_latency():
     
     # Annotate with the impact on the radio
     impact_texts = [
-        "Radio\néveillée\npour Tx",
-        "Radio éveillée\n(2 RTTs + Tx)",
-        "Radio éveillée\n(4 RTTs + Tx)"
+        "Radio\nawake\nfor Tx",
+        "Radio awake\n(2 RTTs + Tx)",
+        "Radio awake\n(4 RTTs + Tx)"
     ]
     
     for bar, text in zip(bars, impact_texts):
         height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + 0.15, str(int(height)) + " Allers-Retours", 
+        ax.text(bar.get_x() + bar.get_width()/2., height + 0.15, str(int(height)) + " Round Trips", 
                 ha='center', va='bottom', fontweight='bold', fontsize=12)
         
         if height == 0:
@@ -92,8 +92,8 @@ def plot_rtt_latency():
 
     ax.set_ylim(0, 5)
     ax.set_yticks(range(6))
-    ax.set_ylabel('Nombre d\'Allers-Retours Réseau (RTT)', fontweight='bold')
-    ax.set_title("Latence d'Établissement & Coût Énergétique Radio", pad=20, fontweight='bold', fontsize=16)
+    ax.set_ylabel('Number of Network Round Trips (RTT)', fontweight='bold')
+    ax.set_title("Establishment Latency & Radio Energy Cost", pad=20, fontweight='bold', fontsize=16)
     
     sns.despine(top=True, right=True, left=True)
     ax.yaxis.grid(True, linestyle='-', alpha=0.2)
@@ -108,16 +108,16 @@ def plot_processing_time():
     """Processing time in microseconds (easier to grasp than MiB/s for IoT)."""
     # 48KB frame processing times derived from criterion data
     data = [
-        {"Opération": "Chiffrement ChaCha20", "Temps (µs)": 75},
-        {"Opération": "FEC Encodage (10%)", "Temps (µs)": 169},
-        {"Opération": "Pipeline Complet (Tx)", "Temps (µs)": 338},
+        {"Operation": "ChaCha20 Encryption", "Time (µs)": 75},
+        {"Operation": "FEC Encoding (10%)", "Time (µs)": 169},
+        {"Operation": "Full Pipeline (Tx)", "Time (µs)": 338},
     ]
     df = pd.DataFrame(data)
     
     fig, ax = plt.subplots(figsize=(9, 4))
     
     colors = sns.color_palette("Blues_d", len(df))
-    sns.barplot(data=df, y="Opération", x="Temps (µs)", palette=colors, ax=ax, orient='h', edgecolor='black', linewidth=0.5)
+    sns.barplot(data=df, y="Operation", x="Time (µs)", palette=colors, ax=ax, orient='h', edgecolor='black', linewidth=0.5)
     
     for p in ax.patches:
         width = p.get_width()
@@ -128,8 +128,8 @@ def plot_processing_time():
                     textcoords='offset points')
 
     ax.set_xlim(0, 450)
-    ax.set_title("Temps de Traitement Serveur par Image (48 Ko)", pad=20, fontweight='bold', fontsize=16)
-    ax.set_xlabel("Temps d'exécution (Microsecondes)", fontweight='bold')
+    ax.set_title("Server Processing Time per Image (48 KB)", pad=20, fontweight='bold', fontsize=16)
+    ax.set_xlabel("Execution Time (Microseconds)", fontweight='bold')
     ax.set_ylabel("")
     
     sns.despine(bottom=True, left=True)
